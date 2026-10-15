@@ -129,7 +129,11 @@ jobs:
             "$IMAGE" bash -euc '
               export PATH="/usr/local/go/bin:$PATH"
               go version
-              CGO_ENABLED=1 go build -buildmode=c-shared \
+              # -buildvcs=false because manylinux2014 ships no git: with the
+              # default (auto) Go shells out to git to stamp VCS metadata and
+              # dies with "error obtaining VCS status: exit status 128". The
+              # stamp is cosmetic and nothing here reads it.
+              CGO_ENABLED=1 go build -buildmode=c-shared -buildvcs=false \
                 -ldflags "-X main.pluginRepoURL=$REPO_URL -X main.pluginAuthor=$AUTHOR" \
                 -o opencode-free.so .
             '
@@ -165,9 +169,20 @@ jobs:
           set -eu
           # The store requires the library at the archive root, named <id>.so.
           # Nested paths, several libraries, or a different name are rejected.
-          archive="opencode-free_${VERSION}_linux_${{ matrix.goarch }}.zip"
-          zip -q -j "$archive" opencode-free.so
-          unzip -l "$archive"
+          # python3 rather than the zip(1) CLI, which is not guaranteed to be
+          # installed on the runner; this also lets us assert the layout instead
+          # of hoping -j flattened it.
+          VERSION="$VERSION" GOARCH="${{ matrix.goarch }}" python3 - <<'PY'
+          import os, zipfile
+          archive = f"opencode-free_{os.environ['VERSION']}_linux_{os.environ['GOARCH']}.zip"
+          with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
+              z.write("opencode-free.so", "opencode-free.so")
+          with zipfile.ZipFile(archive) as z:
+              names = z.namelist()
+              for n in names:
+                  print(f"{z.getinfo(n).file_size:>10}  {n}")
+              assert names == ["opencode-free.so"], f"unexpected archive layout: {names}"
+          PY
 
       - uses: actions/upload-artifact@v4
         with:
@@ -214,7 +229,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**
+          files: artifacts/*
           body: |
             Prebuilt plugins, plus the sources.
 
