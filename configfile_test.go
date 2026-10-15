@@ -119,6 +119,10 @@ func TestUnknownProviders(t *testing.T) {
 		{"case insensitive", []string{"OpenCode"}, []string{"opencode"}, nil},
 		{"one unknown", []string{"opencode", "typo"}, []string{"opencode"}, []string{"typo"}},
 		{"nothing discovered", []string{"opencode"}, nil, []string{"opencode"}},
+		// The wildcard is not a group name, so a typo check must not report it.
+		{"wildcard is never unknown", []string{"*"}, []string{"opencode"}, nil},
+		{"wildcard among names", []string{"*", "typo"}, []string{"opencode"}, []string{"typo"}},
+		{"wildcard without discovery", []string{"*"}, nil, nil},
 	}
 	for _, tc := range cases {
 		got := unknownProviders(tc.selected, tc.discovered)

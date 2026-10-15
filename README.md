@@ -26,7 +26,13 @@ Declares one capability (`request_interceptor`) on the `request.intercept_after`
 
 The rewrite is idempotent: a request that is already valid is not modified or re-encoded.
 
-**Untouched is the default.** The hook fires for every provider CPA serves, so `providers` is required and anything not selected passes through byte for byte — without it, Claude/Gemini/Codex traffic would get `stream: true` forced on it and its own tool definitions overwritten.
+**Untouched is the default.** The hook fires for every provider CPA serves, so
+anything not selected passes through byte for byte — without a selection,
+Claude/Gemini/Codex traffic would get `stream: true` forced on it and its own
+tool definitions overwritten. `providers` takes group names, or `*` for every
+OpenAI-compatible group (the wildcard widens the group match, not the provider
+type, so it still cannot reach Claude/Gemini/Codex credentials). Left empty the
+plugin registers but rewrites nothing.
 
 ## Install
 
@@ -39,6 +45,22 @@ plugins:
   store-sources:
     - "https://raw.githubusercontent.com/kakaw-1/opencode-free/main/registry.json"
 ```
+
+The install writes the prebuilt library into `plugins.dir`, enables the plugin
+and hot-loads it — no restart. **One step is still yours: choosing the
+providers.** The store cannot write plugin config (`install` takes only a
+`version` query parameter), so a freshly installed plugin registers inert and
+rewrites nothing until you set `providers` in the management UI, or:
+
+```sh
+curl -X PATCH -H 'Authorization: Bearer <management-key>' \
+  -H 'Content-Type: application/json' \
+  -d '{"providers":"opencode"}' \
+  http://127.0.0.1:8317/v0/management/plugins/opencode-free/config
+```
+
+That persists the config and hot-reloads; no restart. Use `{"providers":"*"}`
+to cover every OpenAI-compatible group.
 
 **From source** — needs Go 1.26+ and gcc:
 
@@ -58,7 +80,7 @@ plugins:
     opencode-free:
       enabled: true
       priority: 100
-      providers: opencode          # required; the name under api-keys.openai-compatibility
+      providers: opencode          # a name under api-keys.openai-compatibility, or "*" for all of them
 
 api-keys:
   openai-compatibility:
@@ -88,9 +110,17 @@ So the plugin downloads and caches it at registration instead — one fetch, reu
 
 Reverse engineered and verified end to end against real CPA and the real upstream on 2026-10-15. The gate is not a documented contract and has changed twice already (2026-09-16, 2026-10-14) — if requests start returning 403, delete the cached catalogue and restart; no rebuild needed.
 
-The store path is verified too, not just the source build: the published `v0.1.0`
-artifact was installed through CPA's own `POST /v0/management/plugin-store/:id/install`
-into a clean plugin directory, hot-loaded without a restart, and served a real
-request with `HTTP 200`. The installed `.so` hashes identically to the released zip.
+The store path is verified too, not just the source build: the published
+artifact was installed through CPA's own
+`POST /v0/management/plugin-store/:id/install` into a clean plugin directory,
+hot-loaded without a restart, and served a real request with `HTTP 200`. The
+installed `.so` hashes identically to the released zip.
+
+That check also found the reason `v0.1.1` exists: a store install writes the
+library and enables the plugin but cannot write `providers`, and `v0.1.0`
+refused to register without it. The install reported success while the plugin
+never loaded. `v0.1.1` registers inert instead, and a single `PATCH` on
+`/v0/management/plugins/opencode-free/config` brings it to life without a
+restart.
 
 MIT — see [LICENSE](LICENSE). [NOTICE](NOTICE) records the scope: the license covers the plugin's source, not the OpenCode tool definitions it fetches at runtime.

@@ -24,15 +24,27 @@ plugins:
     opencode-free:
       enabled: true
       priority: 100
-      # Required. Which OpenAI-compatible providers to rewrite, named as in
+      # Which OpenAI-compatible providers to rewrite, named as in
       # api-keys.openai-compatibility[].name below. Accepts one name or a list:
       #
       #   providers: opencode
       #   providers: [opencode, openrouter]
+      #   providers: "*"              # every OpenAI-compatible group
       #
-      # Anything not selected passes through untouched — the plugin runs for
-      # every provider CPA serves, so without a selection it would rewrite
-      # unrelated traffic.
+      # The wildcard widens the group match, not the provider type, so it still
+      # cannot reach Claude / Gemini / Codex credentials. Anything not selected
+      # passes through untouched — the plugin runs for every provider CPA
+      # serves, so without a selection it would rewrite unrelated traffic.
+      #
+      # Left empty the plugin still registers, but rewrites nothing. That is the
+      # state a plugin-store install starts in: the store writes the library and
+      # sets enabled, but cannot write plugin config. Set this through the
+      # management UI, or:
+      #
+      #   curl -X PATCH -H 'Authorization: Bearer <management-key>' \
+      #     -H 'Content-Type: application/json' \
+      #     -d '{"providers":"opencode"}' \
+      #     http://127.0.0.1:8317/v0/management/plugins/opencode-free/config
       #
       # The names are discovered by reading this very config file (the plugin
       # resolves its path from the host's argv, the way CPA resolves -config).

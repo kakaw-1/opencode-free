@@ -79,7 +79,7 @@ const pluginID = "opencode-free"
 // GitHubRepository are all non-empty (see pluginhost.validPlugin), so these are
 // load-bearing, not decoration. Only the emptiness is checked, but they are
 // shown to operators, so point them at the real repo.
-const pluginVersion = "0.1.0"
+const pluginVersion = "0.1.1"
 
 // Vars rather than consts so `make REPO_URL=... AUTHOR=...` can stamp them in at
 // build time via -ldflags -X. Publishing this source means setting both — see
@@ -101,11 +101,15 @@ type pluginConfig struct {
 	//
 	//	providers: opencode
 	//	providers: [opencode, openrouter]
+	//	providers: "*"          # every OpenAI-compatible group
 	//
-	// The names are discovered from the host at registration (host.auth.list)
-	// and offered back as enum values, so a management UI can render a picker.
+	// The names are discovered from the host's config file at registration and
+	// offered back as enum values, so a management UI can render a picker.
 	// Anything not selected passes through untouched: this plugin runs for every
 	// provider CPA serves.
+	//
+	// Empty is allowed and means "rewrite nothing". That is the state a
+	// plugin-store install starts in, since the store cannot write config.
 	Providers stringList `yaml:"providers"`
 	// Models optionally narrows further, matched against both the selected
 	// upstream model and the client-requested one. "*" is a wildcard. Empty
@@ -332,11 +336,21 @@ func configure(raw []byte) error {
 	cfg.DebugLog = strings.TrimSpace(cfg.DebugLog)
 	cfg.Providers = stringList(trimmedPatterns(cfg.Providers))
 	cfg.Models = trimmedPatterns(cfg.Models)
-	// Refusing to start without a selection is deliberate. The plugin sees every
-	// provider CPA serves, so an empty selection would silently rewrite unrelated
-	// traffic; a loud registration error is far easier to diagnose.
+	// An empty selection registers inert instead of failing registration.
+	//
+	// Failing loudly was the first design, and it is right for a hand-edited
+	// config: a plugin that loads and does nothing looks like "installed but
+	// broken", which is worse than one that refuses to start. The plugin store
+	// inverts that trade. It installs the library and enables the plugin but
+	// cannot write its config, so refusing to register there produces exactly
+	// the silent no-op the loud error existed to prevent: a 200 response
+	// saying restart_required: false, and a plugin that is not loaded.
+	//
+	// Inert is still safe. With no selection nothing is rewritten, which is the
+	// property that actually matters; the failure mode is "does nothing and
+	// says so", not "rewrites the wrong traffic".
 	if len(cfg.Providers) == 0 {
-		return fmt.Errorf("%s requires a non-empty `providers` selection: the plugin runs for every provider CPA serves, so it must be told which ones to act on. Name the OpenAI-compatible groups from `api-keys.openai-compatibility`, e.g. `providers: opencode`. Discovered: %s", pluginID, describeDiscoveredProviders())
+		logHost("warn", fmt.Sprintf("%s: no `providers` selection, so no request will be rewritten. Set it to the OpenAI-compatible groups from `api-keys.openai-compatibility` (e.g. `providers: opencode`), or to `*` for every such group. Discovered: %s", pluginID, describeDiscoveredProviders()))
 	}
 	// A bad catalogue fails registration loudly. Loading inert would look like
 	// "the plugin is installed but does nothing", which is much harder to
@@ -388,7 +402,8 @@ func listOpenAICompatProviders() ([]string, error) {
 	return discoverProvidersFromConfigFile(path)
 }
 
-// unknownProviders returns the selected names discovery did not see.
+// unknownProviders returns the selected names discovery did not see. The
+// wildcard is not a name, so it is never reported as unknown.
 func unknownProviders(selected, discovered []string) []string {
 	known := make(map[string]struct{}, len(discovered))
 	for _, name := range discovered {
@@ -396,6 +411,9 @@ func unknownProviders(selected, discovered []string) []string {
 	}
 	var unknown []string
 	for _, name := range selected {
+		if name == wildcardProvider {
+			continue
+		}
 		if _, ok := known[strings.ToLower(name)]; !ok {
 			unknown = append(unknown, name)
 		}
@@ -445,8 +463,8 @@ func pluginRegistration() registration {
 				{
 					Name:        "providers",
 					Type:        pluginapi.ConfigFieldTypeArray,
-					Description: "Required. OpenAI-compatible providers to rewrite, named as in `api-keys.openai-compatibility[].name`. Accepts one name or a list; anything not selected passes through untouched. This plugin runs for every provider CPA serves, so without a selection it would rewrite unrelated traffic.",
-					EnumValues:  discoveredProviderEnum(),
+					Description: "OpenAI-compatible providers to rewrite, named as in `api-keys.openai-compatibility[].name`. Accepts one name or a list; `*` selects every OpenAI-compatible group. Anything not selected passes through untouched. Leave it empty and the plugin registers but rewrites nothing — a plugin-store install lands in exactly that state, because the store installs and enables a plugin but cannot write its config.",
+					EnumValues:  providerEnumValues(),
 				},
 				{
 					Name:        "models",
@@ -490,11 +508,27 @@ func discoveredProviderEnum() []string {
 	return discovered
 }
 
+// providerEnumValues is what the management UI offers for `providers`: the
+// host's OpenAI-compatible group names plus the wildcard. Enum values on an
+// array field are advisory (only ConfigFieldTypeEnum constrains a value), so a
+// name discovery missed can still be written by hand.
+//
+// The wildcard is only offered once discovery worked. If it did not, the field
+// stays free-form rather than advertising "*" as the single choice.
+func providerEnumValues() []string {
+	discovered := discoveredProviderEnum()
+	if len(discovered) == 0 {
+		return nil
+	}
+	return append([]string{wildcardProvider}, discovered...)
+}
+
 // interceptAfterAuth rewrites the outbound Chat Completions body so OpenCode's
 // free tier accepts it. This is the whole plugin.
 //
 // It runs for every provider CPA serves, so it does nothing unless the model
-// matches the configured filter.
+// matches the configured filter. An empty `providers` means the filter matches
+// nothing, which is how an unconfigured plugin stays inert.
 func interceptAfterAuth(raw []byte) ([]byte, error) {
 	var req pluginapi.RequestInterceptRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
@@ -511,16 +545,21 @@ func interceptAfterAuth(raw []byte) ([]byte, error) {
 
 	decision := "skip"
 	authID := selectedAuthID(req.Metadata)
-	if catalogue != nil && providerSelectionMatches(providers, authID) {
-		if len(models) == 0 || modelMatches(models, req.Model, req.RequestedModel) {
-			decision = "rewrite"
-		} else {
-			decision = "skip:model"
-		}
-	} else if catalogue != nil {
-		decision = "skip:provider"
-	} else {
+	switch {
+	case catalogue == nil:
 		decision = "skip:not-registered"
+	case len(providers) == 0:
+		// Registered inert: the store installed the plugin but its config has
+		// no selection yet. Reported separately from skip:provider so a debug
+		// log says "you have not chosen anything" rather than "you chose
+		// something else".
+		decision = "skip:no-selection"
+	case !providerSelectionMatches(providers, authID):
+		decision = "skip:provider"
+	case len(models) > 0 && !modelMatches(models, req.Model, req.RequestedModel):
+		decision = "skip:model"
+	default:
+		decision = "rewrite"
 	}
 
 	if decision != "rewrite" {

@@ -52,11 +52,15 @@ providers: opencode                      # 单选
 providers:                               # 多选
   - opencode
   - openrouter
+
+providers: "*"                           # 所有 openai-compatibility 组
 ```
 
-**没选的供应商原样放行，一个字节都不动。** 插件对 CPA 服务的所有供应商都生效，所以这是必填项。
+`*` 只放宽**组名**这一层，供应商类型仍然必须是 `openai-compatibility`——所以 Claude / Gemini / Codex 的凭据无论怎么写都匹配不上。
 
-`providers` 里写了但宿主配置里没有的组名，插件会**拒绝注册**并列出可选项：
+**没选的供应商原样放行，一个字节都不动。** 插件对 CPA 服务的所有供应商都生效，所以选择是必需的；留空会注册成惰性，见下节。
+
+`providers` 里写了但宿主配置里没有的组名，插件会**拒绝注册**并列出可选项（`*` 不参与这项校验）：
 
 ```
 plugin.register failed: opencode-free: unknown provider(s) opencod;
@@ -83,9 +87,29 @@ the host serves: opencode, some-other-endpoint
 
 `selected_auth_id` 能用，是因为 `publishSelectedAuthMetadata`（`conductor_execution.go:524`）在 `applyRequestAfterAuthInterceptor`（同文件 588 行）**之前**执行。
 
-### 过滤是必填的
+### 留空会怎样
 
-`providers` 留空插件会**拒绝注册**并报错。因为这个钩子对 CPA 服务的**所有**供应商生效——没有过滤的话，Claude / Gemini / Codex 的请求也会被强制 `stream:true`，调用方自己的 `read`/`shell`/`edit` 工具定义还会被 OpenCode 的覆盖掉。静默改坏无关流量比启动失败难查得多。
+`providers` 留空，插件**照常注册，但什么都不改**，同时打一条 warn 列出发现到的组名：
+
+```
+warn opencode-free: no `providers` selection, so no request will be rewritten.
+     Set it to the OpenAI-compatible groups from `api-keys.openai-compatibility`
+     (e.g. `providers: opencode`), or to `*` for every such group.
+     Discovered: opencode
+```
+
+底线仍然是"没选就不动"。因为这个钩子对 CPA 服务的**所有**供应商生效——没有过滤的话，Claude / Gemini / Codex 的请求也会被强制 `stream:true`，调用方自己的 `read`/`shell`/`edit` 工具定义还会被 OpenCode 的覆盖掉。惰性注册保住了这条底线，永远不会静默改坏无关流量。
+
+**为什么不是拒绝注册。** 最初就是拒绝的，对着手写的配置它是对的：加载了却不干活的插件，看起来像"装上了但坏了"，不如直接启动失败。插件商店把这个取舍反了过来——商店会装库文件、会把插件置为 enabled，却**写不了插件的配置**（`install` 接口只接一个 `version` 查询参数）。那种情况下拒绝注册恰好制造了当初想避免的静默无操作：接口回 `200`、`restart_required: false`，插件却没加载。改成惰性注册之后，"装上了"和"在干活"在管理界面里是分开的两件事，看得到。
+
+补上 `providers` 就生效，管理界面里选或者一条 PATCH 都行，不用重启：
+
+```sh
+curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
+  -H 'Content-Type: application/json' \
+  -d '{"providers":"opencode"}' \
+  http://127.0.0.1:8317/v0/management/plugins/opencode-free/config
+```
 
 `models` 是可选的二次收窄，写不写都行；两个都写时取交集。
 
@@ -95,7 +119,7 @@ the host serves: opencode, some-other-endpoint
 {"decision":"rewrite","changed":true,"selected_auth_id":"openai-compatibility:opencode:6df7070a759c","model":"mimo-v2.6-flash-free","requested_model":"mimo-free","source_format":"openai","to_format":"openai","stream":false}
 ```
 
-`decision` 的取值：`rewrite` / `skip:provider` / `skip:model` / `skip:not-registered`。
+`decision` 的取值：`rewrite` / `skip:no-selection`（没配 `providers`）/ `skip:provider` / `skip:model` / `skip:not-registered`。
 
 ## 本插件做什么
 
@@ -155,10 +179,12 @@ plugins:
     opencode-free:
       enabled: true
       priority: 100
-      providers: opencode              # 必填，组名要和下面 api-keys 里的 name 对上
+      providers: opencode              # 组名要和下面 api-keys 里的 name 对上
       # providers:                     # 多选就写成列表
       #   - opencode
       #   - openrouter
+      # providers: "*"                 # 所有 openai-compatibility 组
+      #                                # 留空则注册成惰性，什么都不改
       # tools-file: "/etc/cpa/opencode_tools.json"   # 可选，见下文「工具定义数据」
       # tools-cache: "/var/cache/opencode-free/opencode_tools.json"
       # models:                        # 可选二次收窄，省略即该组下的所有模型
@@ -199,13 +225,26 @@ api-keys:
 
 ### 从插件商店装
 
-把本仓库的注册表加成额外源，管理界面的商店列表里就会出现 OpenCode Free，装完即用，不需要 `fetch-tools.sh`、不需要手动配 `tools-file`——插件首次启动自己抓工具定义。
+把本仓库的注册表加成额外源，管理界面的商店列表里就会出现 OpenCode Free：
 
 ```yaml
 plugins:
   store-sources:
     - "https://raw.githubusercontent.com/kakaw-1/opencode-free/main/registry.json"
 ```
+
+点安装，商店会下载预编译的 `.so` 放进 `plugins.dir`、把插件置为 enabled、热加载，**不用重启**。工具定义也不用管，插件首次启动自己抓。
+
+**还差一步：选供应商。** 商店能装文件、能改 `enabled`，却写不了插件的 `providers`——`POST /v0/management/plugin-store/:id/install` 只接受一个 `version` 查询参数。所以装完插件是**已注册但惰性**的，请求照过、什么都不改。在管理界面的插件配置里选一下，或者：
+
+```sh
+curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
+  -H 'Content-Type: application/json' \
+  -d '{"providers":"opencode"}' \
+  http://127.0.0.1:8317/v0/management/plugins/opencode-free/config
+```
+
+配置落盘并热重载，不用重启。要一次覆盖所有 openai-compatibility 组就写 `{"providers":"*"}`。
 
 安装走的是和官方商店完全相同的流程（下面「商店的约定」那几条都适用）。fork 的话把 URL 里的 `kakaw-1` 换成你自己。
 
@@ -294,8 +333,12 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 去掉 `tools-file` 且断网、无缓存 | 注册失败，报错指名 `fetch-tools.sh` |
 | 去掉 `tools-file` 且断网、**有**缓存 | 用缓存继续工作，只打一条 warn |
 | `grep` 编出的 `.so` 找官方 `read` 描述 | 无命中（定义没被内嵌） |
-| `POST /v0/management/plugin-store/opencode-free/install`（干净的 plugins 目录） | `status: installed`，落到 `plugins/linux/amd64/opencode-free-v0.1.0.so` |
-| 装完不重启 | 插件热加载并注册成功，`restart_required: false` |
+| `providers` 留空 | 注册成功（不再拒绝），所有请求 `skip:no-selection`，body 未改动 |
+| `providers: "*"` | 任意 `openai-compatibility` 组都 `rewrite`；`anthropic:` 凭据仍 `skip:provider` |
+| `POST /v0/management/plugin-store/opencode-free/install`（干净的 plugins 目录） | `status: installed`，落到 `plugins/linux/amd64/opencode-free-v0.1.1.so` |
+| 装完不重启 | 插件热加载，`restart_required: false` |
+| 干净配置（没有 `plugins.configs.opencode-free`）走商店安装 | 文件落盘、自动 `enabled: true`，插件**已注册但惰性**，warn 里 `Discovered: opencode` |
+| 上一条之后 `PATCH .../plugins/opencode-free/config {"providers":"opencode"}` | `200 {"status":"ok"}`，配置落盘 + 热重载，`registered: true`，不用重启 |
 | 装出来的 `.so` 与 release 里的 amd64 zip 比对 sha256 | 一致（`5563f037…`） |
 | 装完后打真实请求 | `200`，`decision: rewrite` |
 

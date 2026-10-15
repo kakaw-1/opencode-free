@@ -95,6 +95,14 @@ func TestProviderSelectionMatches(t *testing.T) {
 		{"different provider type", []string{"opencode"}, "anthropic:opencode:6df7070a759c", false},
 		{"unparseable credential", []string{"opencode"}, "opencode", false},
 		{"empty credential", []string{"opencode"}, "", false},
+		// The wildcard selects every OpenAI-compatible group. It widens the
+		// group match only: the provider type is still required, so it cannot
+		// reach Claude / Gemini / Codex credentials.
+		{"wildcard alone", []string{"*"}, observedAuthID, true},
+		{"wildcard among names", []string{"openrouter", "*"}, observedAuthID, true},
+		{"wildcard needs the right provider type", []string{"*"}, "anthropic:opencode:6df7070a759c", false},
+		{"wildcard needs a parseable credential", []string{"*"}, "opencode", false},
+		{"wildcard does not match an empty credential", []string{"*"}, "", false},
 	}
 	for _, tc := range cases {
 		if got := providerSelectionMatches(tc.selected, tc.authID); got != tc.want {

@@ -46,11 +46,28 @@ func authIDBelongsToProvider(authID, provider string) bool {
 	return strings.EqualFold(providerType, openAICompatProviderType) && group == provider
 }
 
+// wildcardProvider is the one selection value that is not a group name: it
+// stands for every OpenAI-compatible group. Spelled as a bare "*" so it cannot
+// be mistaken for a real group, and so a config can say "all of them" without
+// having to list groups that do not exist yet.
+const wildcardProvider = "*"
+
 // providerSelectionMatches reports whether the request's credential is one the
 // operator selected. An unselected provider passes through untouched.
+//
+// The wildcard widens the group match, not the provider type: a credential must
+// still belong to an OpenAI-compatible group, so Claude / Gemini / Codex
+// credentials never match it however the selection is spelled.
 func providerSelectionMatches(selected []string, authID string) bool {
 	for _, provider := range selected {
-		if provider != "" && authIDBelongsToProvider(authID, provider) {
+		switch {
+		case provider == "":
+			continue
+		case provider == wildcardProvider:
+			if providerType, _, ok := splitAuthID(authID); ok && strings.EqualFold(providerType, openAICompatProviderType) {
+				return true
+			}
+		case authIDBelongsToProvider(authID, provider):
 			return true
 		}
 	}
