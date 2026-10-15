@@ -130,6 +130,14 @@ So the plugin downloads and caches it at registration instead — one fetch, reu
 
 Reverse engineered and verified end to end against real CPA and the real upstream on 2026-10-15. The gate is not a documented contract and has changed twice already (2026-09-16, 2026-10-14) — if requests start returning 403, delete the cached catalogue and restart; no rebuild needed.
 
+One red herring, because it is the first thing anyone clicks: the management
+panel's per-provider **Test** button always fails for this provider. It posts to
+`/v0/management/api-call` on the management plane, so the interceptor never
+runs, and the body it sends (`stream: false`, no `tools`) fails both halves of
+the gate on its own. `403 FreeTierError` there is expected, not a broken
+install. The only meaningful check is a real `/v1/chat/completions` request plus
+the `decision` field in the debug log.
+
 The store path is verified too, not just the source build: the published
 artifact was installed through CPA's own
 `POST /v0/management/plugin-store/:id/install` into a clean plugin directory,

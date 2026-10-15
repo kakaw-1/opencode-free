@@ -40,6 +40,7 @@ HTTP 403  FreeTierError
 **几个容易踩的点：**
 
 - `/v1/models` **不受闸门保护**，裸请求也回 200——拿它验证"通了没有"是无效的，必须打推理端点。
+- **管理面板里那个"测试"按钮永远红。** 它走 `POST /v0/management/api-call`，也就是**管理面**，插件钩子不会被调用；它发的请求体是 `{"messages":[{"role":"user","content":"Hi"}],"stream":false,"max_tokens":5}`，`stream:false` 加没有 `tools` 又正好踩中闸门的两条。所以 opencode 供应商在这里报 `403 FreeTierError` 是预期结果，既不代表插件坏了，也不代表免费层不能用。唯一判据是数据面的 `/v1/chat/completions` 加上 debug-log 里的 `decision`。
 - 闸门**按模型区分**：免费模型走指纹检查，付费模型（`glm-5.3` 等）返回的是 401 `AuthError`。
 - 名字对不够，定义必须**逐字节**是官方那份。带正确名字的桩定义一样 403。
 - 12 个已识别名字里，**单独发只有 `read` 能过**；但 `read` + 任意未知工具可以过。
@@ -365,6 +366,8 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 裸请求官方 header + 官方 `read` 定义 | `200` |
 | 删掉 provider 的 `models` 列表 | `/v1/models` 从 11 个变 0 个（CPA 不发现上游模型） |
 | 11 个免费模型逐个打一次 | 4 个 `200`；3 个 `400 ModelProtocolUnsupported`（只支持原生协议）；其余 `429 FreeUsageLimitError`（按模型分池限流） |
+| 管理面板供应商条目的"测试"按钮（逐字复刻其请求：`POST /v0/management/api-call` → `<base-url>/chat/completions`，`stream:false`、无 `tools`、带上表单里的 `x-opencode-*` 头） | `403 FreeTierError`，且 `intercept.log` 一行没涨——管理面不过插件 |
+| 同一 `api-call` 改打 `GET <base-url>/models` | `200`，87 个模型；换错误密钥 → `401 Invalid credential` |
 
 即：403 确实由本插件消除，改写范围严格限定在选中的供应商内，且二进制里不含 GPL 数据。
 
