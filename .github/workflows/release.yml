@@ -1,0 +1,233 @@
+# Builds the plugin and publishes the artifacts the CLIProxyAPI plugin store
+# expects. The store is driven by a v* tag: the tag names the version, and the
+# release it points at must carry one zip per platform named
+# <id>_<version>_<goos>_<goarch>.zip plus a checksums.txt.
+#
+# Two things about these artifacts are worth knowing before you rely on them.
+#
+# 1. They contain no tool definitions. The definitions are OpenCode's data, the
+#    copy this plugin was verified against came from opencode2api
+#    (GPL-3.0-or-later), and this plugin is MIT, so embedding them would make
+#    these artifacts a redistribution of GPL data. The plugin downloads and
+#    caches them on first start instead, so a store install still works without
+#    a manual second step. See fetch.go.
+#
+# 2. They are built inside manylinux2014, i.e. against glibc 2.17, not against
+#    the runner's much newer glibc. A c-shared library resolves the Go runtime's
+#    pthread_* and res_search through libc, so one built on a new glibc demands
+#    GLIBC_2.34 and refuses to load on CentOS 7 (2.17) or Ubuntu 20.04 (2.31).
+#    Building against 2.17 keeps the requirement at GLIBC_2.3.2, and the build
+#    asserts that rather than trusting it.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            platform: linux/amd64
+            image: quay.io/pypa/manylinux2014_x86_64
+          - goarch: arm64
+            platform: linux/arm64
+            image: quay.io/pypa/manylinux2014_aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Vet and test
+        # The fetched-catalogue test skips itself when opencode_tools.json is
+        # absent, which is the case here by design.
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -eu
+          declared="$(grep -oE 'pluginVersion[[:space:]]*=[[:space:]]*"[^"]+"' main.go | sed 's/.*"\(.*\)"/\1/')"
+          if [ -z "$declared" ]; then
+            echo "::error::could not read pluginVersion from main.go"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [ "$version" != "$declared" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} means version $version, but main.go declares $declared; bump whichever is stale"
+              exit 1
+            fi
+          else
+            version="0.0.0-dev"
+            echo "::warning::not a tag build: artifacts are named 0.0.0-dev and are not fit for the store"
+          fi
+          # registry.json is what a fork points plugins.store-sources at, so a
+          # version left behind here would advertise a release that is not the
+          # one being published.
+          if [ -f registry.json ]; then
+            registered="$(python3 -c 'import json; print(json.load(open("registry.json"))["plugins"][0]["version"])')"
+            if [ "$registered" != "$declared" ]; then
+              echo "::error::registry.json advertises $registered but main.go declares $declared"
+              exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Warm the module cache and fetch the toolchain
+        # Both are done on the runner rather than in the container: manylinux2014
+        # has no git, and keeping the container offline except for the module
+        # cache removes a whole class of flakiness.
+        run: |
+          set -eu
+          go mod download
+          mkdir -p toolchain
+          curl -fsSL -o toolchain/go.tar.gz \
+            "https://go.dev/dl/$(go env GOVERSION).linux-${{ matrix.goarch }}.tar.gz"
+          tar -C toolchain -xzf toolchain/go.tar.gz
+          rm toolchain/go.tar.gz
+          test -x toolchain/go/bin/go
+
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Build against glibc 2.17
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          PLATFORM: ${{ matrix.platform }}
+          IMAGE: ${{ matrix.image }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          AUTHOR: ${{ github.repository_owner }}
+        run: |
+          set -eu
+          modcache="$(go env GOMODCACHE)"
+          echo "building inside $IMAGE ($PLATFORM)"
+          docker run --rm --platform "$PLATFORM" \
+            -v "$PWD:/w" -w /w \
+            -v "$PWD/toolchain/go:/usr/local/go:ro" \
+            -v "$modcache:/gomodcache" \
+            -e GOMODCACHE=/gomodcache \
+            -e GOCACHE=/tmp/gocache \
+            -e HOME=/tmp \
+            -e GOTOOLCHAIN=local \
+            -e GOARCH -e REPO_URL -e AUTHOR \
+            "$IMAGE" bash -euc '
+              export PATH="/usr/local/go/bin:$PATH"
+              go version
+              CGO_ENABLED=1 go build -buildmode=c-shared \
+                -ldflags "-X main.pluginRepoURL=$REPO_URL -X main.pluginAuthor=$AUTHOR" \
+                -o opencode-free.so .
+            '
+          file opencode-free.so
+
+      - name: Verify the glibc floor
+        # The whole point of the container. If this ever fails, the artifact is
+        # unusable on older hosts even though it built.
+        run: |
+          set -eu
+          highest="$(readelf -V opencode-free.so | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sort -u -V | tail -1)"
+          echo "highest required glibc symbol version: $highest"
+          if [ "$(printf '%s\nGLIBC_2.17\n' "$highest" | sort -V | tail -1)" != "GLIBC_2.17" ]; then
+            echo "::error::the library requires $highest; anything above GLIBC_2.17 will not load on CentOS 7 and similar hosts"
+            exit 1
+          fi
+
+      - name: Verify the binary has no bundled catalogue
+        # Guards the licensing boundary: if someone reintroduces an embed, the
+        # tool descriptions show up in the binary and this fails. The string is
+        # the first line of the official "read" description, which the gate
+        # compares byte for byte.
+        run: |
+          if strings opencode-free.so | grep -qF 'Read the contents of a file or directory'; then
+            echo "::error::the .so embeds OpenCode tool definitions; they must not be redistributed here"
+            exit 1
+          fi
+
+      - name: Package for the plugin store
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          # The store requires the library at the archive root, named <id>.so.
+          # Nested paths, several libraries, or a different name are rejected.
+          archive="opencode-free_${VERSION}_linux_${{ matrix.goarch }}.zip"
+          zip -q -j "$archive" opencode-free.so
+          unzip -l "$archive"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-free-linux-${{ matrix.goarch }}
+          path: opencode-free_*.zip
+
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package sources
+        # Still the most reliable path for a host that cannot use a prebuilt
+        # library, and the only one for an architecture the matrix does not
+        # cover: build on the target machine.
+        run: |
+          make dist
+          sha256sum opencode-free.tar.gz > opencode-free.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-free-src
+          path: |
+            opencode-free.tar.gz
+            opencode-free.tar.gz.sha256
+
+  release:
+    needs: [build, source]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Build checksums.txt
+        # Exactly the name the store looks for, in sha256sum format, covering
+        # the zips it will verify.
+        run: |
+          set -eu
+          cd artifacts
+          rm -f checksums.txt
+          sha256sum opencode-free_*.zip > checksums.txt
+          cat checksums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+          body: |
+            Prebuilt plugins, plus the sources.
+
+            **A prebuilt `.so` contains no tool definitions.** They are OpenCode's
+            data and are not redistributed here, so the plugin downloads and
+            caches them on first start. Nothing extra to do — but if requests
+            start returning 403, re-run the plugin's refresh by deleting the
+            cache (`~/.cache/opencode-free/opencode_tools.json` by default) and
+            restarting CPA. The gate has changed twice.
+
+            These are built against glibc 2.17 so they load on older hosts
+            (CentOS 7, Ubuntu 20.04). If your host is older still, or a
+            different architecture, take `opencode-free.tar.gz` and run
+            `./install.sh` on the machine that runs CPA.
+
+            See `README_CN.md` for the config blocks.
