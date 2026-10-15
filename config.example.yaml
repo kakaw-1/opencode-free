@@ -1,0 +1,80 @@
+# Verified working configuration: CPA + opencode-free plugin + OpenCode Zen free
+# models. End-to-end tested 2026-10-15 against real CPA and the real upstream.
+#
+# Layout this expects:
+#   <this dir>/plugins/opencode-free.so     <- make install
+#
+# Then: cpa -config config.yaml
+
+config-version: 8
+
+server:
+  host: "127.0.0.1"
+  port: 8317
+
+# Client authentication for the proxy API (not upstream provider keys).
+access:
+  api-keys:
+    - "change-me-client-key"
+
+plugins:
+  enabled: true
+  dir: plugins
+  configs:
+    opencode-free:
+      enabled: true
+      priority: 100
+      # Required. Which OpenAI-compatible providers to rewrite, named as in
+      # api-keys.openai-compatibility[].name below. Accepts one name or a list:
+      #
+      #   providers: opencode
+      #   providers: [opencode, openrouter]
+      #
+      # Anything not selected passes through untouched — the plugin runs for
+      # every provider CPA serves, so without a selection it would rewrite
+      # unrelated traffic.
+      #
+      # The names are discovered by reading this very config file (the plugin
+      # resolves its path from the host's argv, the way CPA resolves -config).
+      # A name that is not in the file is a registration error, so a typo fails
+      # loudly instead of silently doing nothing.
+      providers: opencode
+      # Optional. The official OpenCode tool definitions. They are NOT bundled
+      # with the plugin — they are OpenCode's data (GPL-3.0-or-later as copied
+      # from opencode2api) and this plugin is MIT, so they are supplied at
+      # runtime. Leave this out and the plugin downloads and caches them itself
+      # on first start; set it to a local copy (./fetch-tools.sh writes one) to
+      # skip the network entirely, e.g. on an air-gapped host.
+      # tools-file: "/etc/cpa/opencode_tools.json"
+      # tools-cache: "/var/cache/opencode-free/opencode_tools.json"  # where the
+      #   plugin keeps the copy it downloads itself; defaults to the OS cache
+      #   directory (~/.cache/opencode-free/opencode_tools.json)
+      # models:               # optional extra narrowing; omit for every model
+      #   - "mimo-*"
+      # force-stream: true  # default true; only turn off to debug another upstream
+      # debug-log: "/tmp/opencode-free.log"  # one JSON line per intercepted request
+
+api-keys:
+  openai-compatibility:
+    - name: "opencode"
+      # /v1 is required: CPA appends only /chat/completions. Without it you get an
+      # upstream 404, which CPA reports as model_not_found and looks like a
+      # missing model registration.
+      base-url: "https://opencode.ai/inference/v1"
+      headers:
+        User-Agent: "opencode/latest/2.0.29/cli"
+        x-opencode-client: "cli"
+        # $CPA-SESSION-ID expands to CPA's internal session id. If the resulting
+        # value does not match ses_[0-9a-f]{12}[0-9A-Za-z]{14} with a time part
+        # matching ^[0-9a-f]{9}f[c-f][0-9a-f]$, replace both with the constant
+        # below — the gate checks the shape, and a constant works across requests.
+        # x-opencode-session: "ses_c70c671a8ffe559SNDjUqHfi7a"
+        # x-opencode-session-id: "ses_c70c671a8ffe559SNDjUqHfi7a"
+        x-opencode-session: "$CPA-SESSION-ID"
+        x-opencode-session-id: "$CPA-SESSION-ID"
+      keys:
+        # The anonymous free tier key is the literal string "public".
+        - api-key: "public"
+      models:
+        - name: "mimo-v2.6-flash-free"
+          alias: "mimo-free"

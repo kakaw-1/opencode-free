@@ -1,0 +1,19 @@
+# Build output. Never commit these: the .so links against the build machine's
+# libc, so it only loads where it was built (or somewhere newer). Anyone
+# installing should build on their own machine — see README_CN.md.
+*.so
+*.h
+
+# The tool definitions. Deliberately not in this repo: they are OpenCode's data,
+# the copy used here came from opencode2api (GPL-3.0-or-later), and this plugin
+# is MIT. Run fetch-tools.sh to get them locally. Committing this file would
+# relicense the repo by accident.
+opencode_tools.json
+
+# Release artifacts
+dist/
+*.tar.gz
+
+# Local scratch
+*.log
+plugins/
