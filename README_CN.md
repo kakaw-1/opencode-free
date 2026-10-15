@@ -195,19 +195,21 @@ api-keys:
 
 ## 发布与安装
 
-本仓库：**https://github.com/kakaw-1/opencode-free**（MIT），已登记进 CPA 插件商店。
+本仓库：**https://github.com/kakaw-1/opencode-free**（MIT）。已给官方注册表提了上架 PR（[#258](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/pull/258)），**尚未合并**——合并前官方商店里搜不到，用下面「接自己的源」那条。
 
 ### 从插件商店装
 
-CPA 内置官方注册表（`router-for-me/CLIProxyAPI-Plugins-Store`），管理界面里能看到商店列表，装完即用，不需要 `fetch-tools.sh`、不需要手动配 `tools-file`——插件首次启动自己抓工具定义。
+合并进官方注册表（`router-for-me/CLIProxyAPI-Plugins-Store`）之后，管理界面里直接能看到，装完即用，不需要 `fetch-tools.sh`、不需要手动配 `tools-file`——插件首次启动自己抓工具定义。
 
-想接自己的源（比如 fork 之后），在 `config.yaml` 里加：
+**现在就想用商店装**（或 fork 之后自建源），把本仓库的注册表加成额外源即可：
 
 ```yaml
 plugins:
   store-sources:
-    - "https://raw.githubusercontent.com/<你>/opencode-free/main/registry.json"
+    - "https://raw.githubusercontent.com/kakaw-1/opencode-free/main/registry.json"
 ```
+
+这样管理界面的商店列表里就会出现 OpenCode Free，安装走的是和官方商店完全相同的流程（下面「商店的约定」那几条都适用）。fork 的话把 URL 里的 `kakaw-1` 换成你自己。
 
 商店的约定（我们的 CI 已经满足，改别人的插件时注意）：
 
@@ -294,6 +296,10 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 去掉 `tools-file` 且断网、无缓存 | 注册失败，报错指名 `fetch-tools.sh` |
 | 去掉 `tools-file` 且断网、**有**缓存 | 用缓存继续工作，只打一条 warn |
 | `grep` 编出的 `.so` 找官方 `read` 描述 | 无命中（定义没被内嵌） |
+| `POST /v0/management/plugin-store/opencode-free/install`（干净的 plugins 目录） | `status: installed`，落到 `plugins/linux/amd64/opencode-free-v0.1.0.so` |
+| 装完不重启 | 插件热加载并注册成功，`restart_required: false` |
+| 装出来的 `.so` 与 release 里的 amd64 zip 比对 sha256 | 一致（`5563f037…`） |
+| 装完后打真实请求 | `200`，`decision: rewrite` |
 
 即：403 确实由本插件消除，改写范围严格限定在选中的供应商内，且二进制里不含 GPL 数据。
 

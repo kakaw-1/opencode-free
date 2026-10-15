@@ -30,7 +30,17 @@ The rewrite is idempotent: a request that is already valid is not modified or re
 
 ## Install
 
-**From the CPA plugin store.** Built in, nothing to fetch by hand.
+**From the CPA plugin store.** A listing PR is open against the official registry
+([#258](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/pull/258)) but
+**not yet merged**, so the built-in store does not carry it yet. Until then, add
+this repo's registry as an extra source and install through the store UI exactly
+as you would for any listed plugin:
+
+```yaml
+plugins:
+  store-sources:
+    - "https://raw.githubusercontent.com/kakaw-1/opencode-free/main/registry.json"
+```
 
 **From source** — needs Go 1.26+ and gcc:
 
@@ -79,5 +89,10 @@ So the plugin downloads and caches it at registration instead — one fetch, reu
 ## Status
 
 Reverse engineered and verified end to end against real CPA and the real upstream on 2026-10-15. The gate is not a documented contract and has changed twice already (2026-09-16, 2026-10-14) — if requests start returning 403, delete the cached catalogue and restart; no rebuild needed.
+
+The store path is verified too, not just the source build: the published `v0.1.0`
+artifact was installed through CPA's own `POST /v0/management/plugin-store/:id/install`
+into a clean plugin directory, hot-loaded without a restart, and served a real
+request with `HTTP 200`. The installed `.so` hashes identically to the released zip.
 
 MIT — see [LICENSE](LICENSE). [NOTICE](NOTICE) records the scope: the license covers the plugin's source, not the OpenCode tool definitions it fetches at runtime.
