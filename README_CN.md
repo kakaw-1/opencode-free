@@ -195,13 +195,11 @@ api-keys:
 
 ## 发布与安装
 
-本仓库：**https://github.com/kakaw-1/opencode-free**（MIT）。已给官方注册表提了上架 PR（[#258](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/pull/258)），**尚未合并**——合并前官方商店里搜不到，用下面「接自己的源」那条。
+本仓库：**https://github.com/kakaw-1/opencode-free**（MIT）。**未上架官方注册表**，内置商店里搜不到——用下面「接自己的源」的方式装，或者从源码构建。
 
 ### 从插件商店装
 
-合并进官方注册表（`router-for-me/CLIProxyAPI-Plugins-Store`）之后，管理界面里直接能看到，装完即用，不需要 `fetch-tools.sh`、不需要手动配 `tools-file`——插件首次启动自己抓工具定义。
-
-**现在就想用商店装**（或 fork 之后自建源），把本仓库的注册表加成额外源即可：
+把本仓库的注册表加成额外源，管理界面的商店列表里就会出现 OpenCode Free，装完即用，不需要 `fetch-tools.sh`、不需要手动配 `tools-file`——插件首次启动自己抓工具定义。
 
 ```yaml
 plugins:
@@ -209,7 +207,7 @@ plugins:
     - "https://raw.githubusercontent.com/kakaw-1/opencode-free/main/registry.json"
 ```
 
-这样管理界面的商店列表里就会出现 OpenCode Free，安装走的是和官方商店完全相同的流程（下面「商店的约定」那几条都适用）。fork 的话把 URL 里的 `kakaw-1` 换成你自己。
+安装走的是和官方商店完全相同的流程（下面「商店的约定」那几条都适用）。fork 的话把 URL 里的 `kakaw-1` 换成你自己。
 
 商店的约定（我们的 CI 已经满足，改别人的插件时注意）：
 

@@ -30,11 +30,9 @@ The rewrite is idempotent: a request that is already valid is not modified or re
 
 ## Install
 
-**From the CPA plugin store.** A listing PR is open against the official registry
-([#258](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/pull/258)) but
-**not yet merged**, so the built-in store does not carry it yet. Until then, add
-this repo's registry as an extra source and install through the store UI exactly
-as you would for any listed plugin:
+**From the CPA plugin store.** Not listed in the official registry, so the built-in
+store does not carry it. Add this repo's registry as an extra source and install
+through the store UI exactly as you would for any listed plugin:
 
 ```yaml
 plugins:
