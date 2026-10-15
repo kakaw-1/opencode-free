@@ -8,7 +8,17 @@
 HTTP 403  FreeTierError
 ```
 
-原因不是 header 缺失，也不是 URL 写错。免费层的闸门检查的是**请求体的内容**，要求请求看起来像一次 OpenCode agent 会话。CPA 的供应商配置能加任意 header，但**没有注入 body 的能力**——所以这件事只能靠插件。
+原因不是 URL 写错。闸门同时看 **header 和请求体**：header 那一半 CPA 的供应商配置就能满足（见下表），另一半——请求体必须 `stream: true` 且带**官方原版** `read` 工具定义——供应商配置**没有注入 body 的能力**，所以这件事只能靠插件。
+
+2026-10-15 对 `https://opencode.ai/inference` 做消融，两边都不能省：
+
+| 裸请求（不经 CPA） | 结果 |
+|---|---|
+| 官方 header 齐、body 无 `tools` | `403 FreeTierError` |
+| 无官方 header、body 带官方 `read` 定义 | `403 FreeTierError` |
+| 官方 header 齐 **且** body 带官方 `read` 定义 | `200` |
+
+所以"插件启用了还 403"只有两种解释：请求没被改写（最常见，见下文商店安装那一步），或者改写了但上游要的 `read` 定义变了。
 
 ## 闸门配方（2026-10-15 直接对 `https://opencode.ai/inference` 实测）
 
@@ -219,6 +229,10 @@ api-keys:
 
 时间部分（`ses_` 之后 12 位十六进制）需匹配 `^[0-9a-f]{9}f[c-f][0-9a-f]$`。
 
+`models:` 那一节是 CPA 列出和路由模型的唯一依据：`/v1/models` 只回这里声明过的名字，CPA **不会**去上游发现模型，本插件也不注册模型。实测把 `models` 整段删掉，`/v1/models` 立刻从 11 个变成 0 个。想用哪几个免费模型就得逐个写进来——2026-10-15 上游一共给出 11 个：`cat-jam-free`、`mimo-v2.6-flash-free`、`muse-spark-1.2-contributor-free`、`muse-spark-1.3-contributor-free`、`nemotron-3.5-super-vl-free`、`nemotron-3.5-lightning-free`、`jev-1.13-free`、`step-5-preview-free`、`longcat-2.5-preview-free`、`deepseek-v4.1-flash-free`、`space-bunny-free`。
+
+这 11 个不是同一种协议，插件也管不了：`muse-spark-1.2-contributor-free`、`muse-spark-1.3-contributor-free`、`jev-1.13-free` 走 `/v1/chat/completions` 会得到 `400 ModelProtocolUnsupported`（它们只支持原生协议），另外几个则按模型分池限流，配额用完是 `429 FreeUsageLimitError`。这两种都是上游给的，不是改写失败——判定改写是否生效看 debug-log 里的 `decision` 和 `changed`。
+
 ## 发布与安装
 
 本仓库：**https://github.com/kakaw-1/opencode-free**（MIT）。**未上架官方注册表**，内置商店里搜不到——用下面「接自己的源」的方式装，或者从源码构建。
@@ -235,7 +249,9 @@ plugins:
 
 点安装，商店会下载预编译的 `.so` 放进 `plugins.dir`、把插件置为 enabled、热加载，**不用重启**。工具定义也不用管，插件首次启动自己抓。
 
-**还差一步：选供应商。** 商店能装文件、能改 `enabled`，却写不了插件的 `providers`——`POST /v0/management/plugin-store/:id/install` 只接受一个 `version` 查询参数。所以装完插件是**已注册但惰性**的，请求照过、什么都不改。在管理界面的插件配置里选一下，或者：
+**还差一步：选供应商。** 商店能装文件、能改 `enabled`，却写不了插件的 `providers`——`POST /v0/management/plugin-store/:id/install` 只接受一个 `version` 查询参数。所以装完插件是**已注册但惰性**的，请求照过、什么都不改。
+
+这一步没做，症状就是"插件明明启用了还是 403"：插件列表里 `enabled: true`、`registered: true`，请求却原样透传，上游照旧回 `403 FreeTierError`，debug-log 里的 `decision` 是 `skip:no-selection`。在管理界面的插件配置里选一下，或者：
 
 ```sh
 curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
@@ -341,6 +357,14 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 上一条之后 `PATCH .../plugins/opencode-free/config {"providers":"opencode"}` | `200 {"status":"ok"}`，配置落盘 + 热重载，`registered: true`，不用重启 |
 | 装出来的 `.so` 与 release 里的 amd64 zip 比对 sha256 | 一致（`72e65d4e…`） |
 | 装完后打真实请求 | `200`，`decision: rewrite` |
+| 装完后**没**配 `providers`，打真实请求 | `403 FreeTierError`，debug-log `skip:no-selection`，body 未改动 |
+| 上一条之后 `PATCH .../config {"providers":[]}` → 再打同一请求 → 再 `PATCH {"providers":["opencode"]}` | `403` → `200`，两条日志分别是 `skip:no-selection` 与 `rewrite` |
+| `providers: ["opencode"]` 下连打 6 次 `cat-jam-free` / `step-5-preview-free` | 6× `200`，每次 `changed: true` |
+| 裸请求只补官方 header、body 无 `tools` | `403 FreeTierError` |
+| 裸请求只带官方 `read` 定义、无官方 header | `403 FreeTierError` |
+| 裸请求官方 header + 官方 `read` 定义 | `200` |
+| 删掉 provider 的 `models` 列表 | `/v1/models` 从 11 个变 0 个（CPA 不发现上游模型） |
+| 11 个免费模型逐个打一次 | 4 个 `200`；3 个 `400 ModelProtocolUnsupported`（只支持原生协议）；其余 `429 FreeUsageLimitError`（按模型分池限流） |
 
 即：403 确实由本插件消除，改写范围严格限定在选中的供应商内，且二进制里不含 GPL 数据。
 

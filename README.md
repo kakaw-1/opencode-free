@@ -12,7 +12,7 @@ Configure OpenCode as an `api-keys.openai-compatibility` provider in CPA and eve
 HTTP 403  FreeTierError
 ```
 
-Nothing is missing from the headers and the URL is right. The free tier gates on the **request body**: it wants a streaming request carrying OpenCode's official `read` tool definition, byte for byte. A CPA provider config can inject arbitrary headers but has no way to touch the body — so a plugin is the only seam.
+The URL is right, and headers alone do not get you in. The gate wants both halves: the OpenCode headers (a CPA provider config supplies those) **and** a streaming body carrying OpenCode's official `read` tool definition, byte for byte. Ablated against the real upstream on 2026-10-15: headers without the tool definition → 403, tool definition without the headers → 403, both → 200. A CPA provider config has no way to touch the body, so a plugin is the only seam.
 
 ## What this does
 
@@ -51,6 +51,11 @@ and hot-loads it — no restart. **One step is still yours: choosing the
 providers.** The store cannot write plugin config (`install` takes only a
 `version` query parameter), so a freshly installed plugin registers inert and
 rewrites nothing until you set `providers` in the management UI, or:
+
+Skip that step and the symptom is "the plugin is enabled and I still get 403":
+`enabled: true` and `registered: true` in the plugin list, requests passed
+through untouched, `403 FreeTierError` from upstream, and `skip:no-selection` as
+the `decision` in the debug log.
 
 ```sh
 curl -X PATCH -H 'Authorization: Bearer <management-key>' \
@@ -99,6 +104,21 @@ api-keys:
 ```
 
 Build on the machine that will run it, or take the prebuilt library from the releases (built against glibc 2.17 so it loads on older hosts).
+
+`models` is the only thing CPA lists or routes on: `/v1/models` returns exactly
+the names declared there, and neither CPA nor this plugin discovers upstream
+models. Deleting the list took a working setup from 11 models to 0. Upstream
+offered 11 free ones on 2026-10-15 — `cat-jam-free`,
+`mimo-v2.6-flash-free`, `muse-spark-1.2-contributor-free`,
+`muse-spark-1.3-contributor-free`, `nemotron-3.5-super-vl-free`,
+`nemotron-3.5-lightning-free`, `jev-1.13-free`, `step-5-preview-free`,
+`longcat-2.5-preview-free`, `deepseek-v4.1-flash-free`, `space-bunny-free` —
+and they are not interchangeable: three of them (`muse-spark-1.2-contributor-free`,
+`muse-spark-1.3-contributor-free`, `jev-1.13-free`) answer `400
+ModelProtocolUnsupported` on `/v1/chat/completions` because they only speak their
+native protocol, and the rest are rate-limited in per-model pools (`429
+FreeUsageLimitError`). Neither is a rewrite failure; the debug log's `decision`
+and `changed` say whether the plugin did its part.
 
 ## The tool definitions are not in this repo
 
