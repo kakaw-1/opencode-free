@@ -19,11 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Note on scope: this license covers the plugin's own source. The OpenCode tool
-definitions the plugin sends at runtime (opencode_tools.json) are a separate
-work, fetched by the user rather than distributed here — see README_CN.md,
-"工具定义数据". They originate from OpenCode's CLI; the copy this plugin was
-verified against came from opencode2api, which is GPL-3.0-or-later.

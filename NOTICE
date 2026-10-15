@@ -1,0 +1,17 @@
+Scope of the MIT license in LICENSE
+===================================
+
+The MIT license covers this plugin's own source code.
+
+It does NOT cover the OpenCode tool definitions the plugin sends at runtime
+(opencode_tools.json). That file is a separate work, originating from OpenCode's
+CLI. The copy this plugin was verified against came from opencode2api, which is
+GPL-3.0-or-later.
+
+Because of that, the definitions are not distributed here: not in the source
+tree and not embedded in the compiled library. The plugin downloads them on the
+operator's own machine at registration and caches them there, which is the same
+thing fetch-tools.sh does by hand. See README_CN.md, "工具定义数据（不在本仓库里）".
+
+Nothing in this repository is derived from opencode2api's implementation. The
+plugin was written against the observed behaviour of the free-tier gate.

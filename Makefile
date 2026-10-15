@@ -23,7 +23,7 @@ SOURCES := $(wildcard *.go) go.mod go.sum
 
 # Files that make up a source release.
 DIST_FILES := $(SOURCES) $(wildcard *.sh) Makefile README.md README_CN.md \
-	LICENSE config.example.yaml registry.json .gitignore
+	LICENSE NOTICE config.example.yaml registry.json .gitignore
 
 # Override GO to use a specific toolchain, e.g. make GO=/usr/local/go/bin/go
 GO ?= go

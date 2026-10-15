@@ -80,4 +80,4 @@ So the plugin downloads and caches it at registration instead — one fetch, reu
 
 Reverse engineered and verified end to end against real CPA and the real upstream on 2026-10-15. The gate is not a documented contract and has changed twice already (2026-09-16, 2026-10-14) — if requests start returning 403, delete the cached catalogue and restart; no rebuild needed.
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). [NOTICE](NOTICE) records the scope: the license covers the plugin's source, not the OpenCode tool definitions it fetches at runtime.
