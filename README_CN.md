@@ -364,6 +364,8 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 裸请求只补官方 header、body 无 `tools` | `403 FreeTierError` |
 | 裸请求只带官方 `read` 定义、无官方 header | `403 FreeTierError` |
 | 裸请求官方 header + 官方 `read` 定义 | `200` |
+| 插件开启且 `changed: true`，但删掉供应商配置里的 `headers` 整段 | `403 FreeTierError`——插件改了 body，头补不上，两半缺一不可 |
+| 上一条把 `headers` 加回来 | `200` |
 | 删掉 provider 的 `models` 列表 | `/v1/models` 从 11 个变 0 个（CPA 不发现上游模型） |
 | 11 个免费模型逐个打一次 | 4 个 `200`；3 个 `400 ModelProtocolUnsupported`（只支持原生协议）；其余 `429 FreeUsageLimitError`（按模型分池限流） |
 | 管理面板供应商条目的"测试"按钮（逐字复刻其请求：`POST /v0/management/api-call` → `<base-url>/chat/completions`，`stream:false`、无 `tools`、带上表单里的 `x-opencode-*` 头） | `403 FreeTierError`，且 `intercept.log` 一行没涨——管理面不过插件 |
