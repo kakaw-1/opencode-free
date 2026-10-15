@@ -138,6 +138,16 @@ the gate on its own. `403 FreeTierError` there is expected, not a broken
 install. The only meaningful check is a real `/v1/chat/completions` request plus
 the `decision` field in the debug log.
 
+The one accepted cost is the injected `read` itself: prompts that ask for a file
+make the model call it (17/17 measured across four free models; plain chat
+prompts never did, 7/7), and the caller gets a tool call for a tool it never
+declared. Stripping it out of the response was measured and rejected — in 14 of
+those 17 the reply was empty anyway, so stripping would have handed the caller
+the same empty answer for the price of a per-chunk hot-path hook. `tool_choice:
+"none"` is not a substitute either: `cat-jam-free` and
+`nemotron-3.5-lightning-free` honour it, `step-5-preview-free` ignores it
+outright.
+
 The store path is verified too, not just the source build: the published
 artifact was installed through CPA's own
 `POST /v0/management/plugin-store/:id/install` into a clean plugin directory,

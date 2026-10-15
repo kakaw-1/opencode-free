@@ -150,12 +150,13 @@ curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
 
 - 不改任何 header。指纹 header 由 CPA 配置里的 `headers:` 提供（见下）。
 - 不碰 `Authorization`，由 CPA 的 `api-key: public` 提供。
-- 不做响应侧处理。
+- 不做响应侧处理。**剥离注入 `read` 产生的 tool call，收益太窄，不值这个代价**（2026-10-15 实测）：17 次泄漏里 14 次 content 本来就是空的，剥完用户拿到的还是空回复；只有 3 次能保住 28–90 字符的正文。代价却是逐 chunk 的热路径钩子（`response.intercept_stream_chunk` + `DropChunk`）加每请求状态，还要把 `finish_reason` 从 `tool_calls` 改写掉。收益窄、成本在热路径上，所以不做。
 - **不做 opencode2api 的 phantom guard**（`usableToolBlocks` + `finish_reason` 降级）。
 
 ## 已知风险（接受）
 
-- **注入的 `read` 会真的被调用。** 带文件类提示词时，模型会返回 `finish_reason: tool_calls`、`tool_calls[0].function.name = "read"`、content 为空。`tool_choice: "none"` **无效**，上游忽略它。这个 `tool_use` 会作为下游客户端从未声明过的工具调用送达。
+- **注入的 `read` 会真的被调用。** 文件类/agent 类提示词的请求实测 **17/17** 都触发了 `read` 调用（`finish_reason: tool_calls`），普通对话提示词 **7/7** 不触发。这 17 次里 **14 次 content 为空**，只有 3 次带 28–90 字符的正文。客户端自己声明了工具也拦不住——模型会挑注入的 `read`，而不是客户端那件工具（3/3）。这个 `tool_use` 会作为下游客户端从未声明过的工具调用送达。
+- **`tool_choice: "none"` 不是可靠的堵法。** `cat-jam-free` 5/5 遵守（不再产生 tool call，但 content 仍然常常为空）、`nemotron-3.5-lightning-free` 1/1 遵守，而 `step-5-preview-free` 3/3 **直接忽略**，照样回 tool call。在请求里塞一句"你没有工具"的系统提示也一样无效（2/2 仍然调用）。所以这是**按模型而异**的，不能当作通用开关。
 - **非流式下游请求会坏。** 上游强制 SSE，本插件不设保护，放行让它坏。
 - **常量 session id 在高并发下是否被限流，未验证。**
 - **闸门会变。** 2026-09-16 和 2026-10-14 都改过（后者加了逐字节定义比对）。工具定义不内嵌，是运行时获取的——删掉缓存（或重跑 `fetch-tools.sh`）再重启即可，不用重新编译。
@@ -370,6 +371,13 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 11 个免费模型逐个打一次 | 4 个 `200`；3 个 `400 ModelProtocolUnsupported`（只支持原生协议）；其余 `429 FreeUsageLimitError`（按模型分池限流） |
 | 管理面板供应商条目的"测试"按钮（逐字复刻其请求：`POST /v0/management/api-call` → `<base-url>/chat/completions`，`stream:false`、无 `tools`、带上表单里的 `x-opencode-*` 头） | `403 FreeTierError`，且 `intercept.log` 一行没涨——管理面不过插件 |
 | 同一 `api-call` 改打 `GET <base-url>/models` | `200`，87 个模型；换错误密钥 → `401 Invalid credential` |
+| 文件类/agent 类提示词 × 4 个免费模型（经 CPA 与直打上游各若干次） | **17/17** 触发 `read` 调用；`finish_reason: tool_calls`；其中 14 次 content 为空 |
+| 普通对话提示词 × 3 个模型 | **7/7** 不触发，`finish_reason: stop` |
+| 客户端自己声明 `get_weather` 后再问读文件 | 模型调的是注入的 `read`，不是客户端的工具（3/3） |
+| 客户端自己声明官方 `read` 定义 | 插件原样保留，不额外注入；那一次撞 token 上限、没产生调用 |
+| 同请求加 `tool_choice: "none"` | `cat-jam-free` 5/5、`nemotron-3.5-lightning-free` 1/1 不再产生 tool call；`step-5-preview-free` 3/3 忽略它，照样回 tool call |
+| 同请求塞系统提示"你没有工具，直接回答" | 无效，2/2 仍然调 `read` |
+| 剥离收益测算（把 tool call 从响应里去掉后客户端看到什么） | 17 次泄漏里 14 次剥完仍是空回复，3 次保住 28–90 字符正文 |
 
 即：403 确实由本插件消除，改写范围严格限定在选中的供应商内，且二进制里不含 GPL 数据。
 
