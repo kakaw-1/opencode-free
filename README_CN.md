@@ -339,7 +339,7 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 装完不重启 | 插件热加载，`restart_required: false` |
 | 干净配置（没有 `plugins.configs.opencode-free`）走商店安装 | 文件落盘、自动 `enabled: true`，插件**已注册但惰性**，warn 里 `Discovered: opencode` |
 | 上一条之后 `PATCH .../plugins/opencode-free/config {"providers":"opencode"}` | `200 {"status":"ok"}`，配置落盘 + 热重载，`registered: true`，不用重启 |
-| 装出来的 `.so` 与 release 里的 amd64 zip 比对 sha256 | 一致（`5563f037…`） |
+| 装出来的 `.so` 与 release 里的 amd64 zip 比对 sha256 | 一致（`72e65d4e…`） |
 | 装完后打真实请求 | `200`，`decision: rewrite` |
 
 即：403 确实由本插件消除，改写范围严格限定在选中的供应商内，且二进制里不含 GPL 数据。
