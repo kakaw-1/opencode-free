@@ -448,6 +448,7 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 大样本回放：修复前会 403 的标题 body ×60 + 客户端原始 agent body（`filePath` 版 `read`）×90 | **`150/150` `200`** |
 | 把模型换成 `cat-jam-free` 再跑 5 个真实会话 | `13/13` `200`，5/5 会话退出码 0，零 `SchemaError`——修复与模型无关 |
 | 免费额度是按模型分池的：把 `deepseek-v4.1-flash-free` 打到限流后再测 | `deepseek-v4.1-flash-free` 与 `mimo-v2.6-flash-free` 持续 `429 FreeUsageLimitError`，同一时刻 `cat-jam-free`、`step-5-preview-free` 仍 `200`；上游不回 `Retry-After` |
+| **按提交源码重新构建后**（`sha256 29de7ca6…`）再验一遍：10 个真实 deepseek 会话 + 5 个 cat-jam 会话 + 150 次回放（同一批修复前会 403 的 body，模型换成 `cat-jam-free`） | **`193/193` `200`**，零 `403`、零 `SchemaError`；按三项法则，这一样本量下 95% 置信的失败率上界约 1.55% |
 
 即：403 确实由本插件消除，改写范围严格限定在选中的供应商内，且二进制里不含 GPL 数据。
 
