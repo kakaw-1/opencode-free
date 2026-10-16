@@ -79,7 +79,7 @@ const pluginID = "opencode-free"
 // GitHubRepository are all non-empty (see pluginhost.validPlugin), so these are
 // load-bearing, not decoration. Only the emptiness is checked, but they are
 // shown to operators, so point them at the real repo.
-const pluginVersion = "0.1.1"
+const pluginVersion = "0.1.2"
 
 // Vars rather than consts so `make REPO_URL=... AUTHOR=...` can stamp them in at
 // build time via -ldflags -X. Publishing this source means setting both — see

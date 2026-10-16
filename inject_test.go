@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -122,31 +124,91 @@ func TestKeepsClientToolsAndAppendsRead(t *testing.T) {
 	}
 }
 
-// A client that declares "read" itself (Claude Code's own tool set, or another
-// OpenCode-shaped caller) must get the genuine definition, because the gate
-// rejects a recognised name carrying anything else.
-func TestReplacesStubReadWithGenuine(t *testing.T) {
+// The gate only checks that a tool named "read" is present, so a caller that
+// declares its own read keeps it untouched — including OpenCode 1.18.35, whose
+// read takes `filePath` where the catalogue says `path`. Substituting the
+// catalogue definition hands the model argument names the client rejects.
+func TestKeepsClientDeclaredRead(t *testing.T) {
 	c := testCatalogue()
-	body := []byte(`{"model":"m","stream":true,"tools":[{"type":"function","function":{"name":"read","description":"Read a file.","parameters":{"type":"object","properties":{"file_path":{"type":"string"}}}}}]}`)
+	body := []byte(`{"model":"m","stream":true,"tools":[{"type":"function","function":{"name":"read","description":"Read a file.","parameters":{"type":"object","properties":{"filePath":{"type":"string"}}}}}]}`)
 	out, changed := prepareBody(body, true, c)
-	if !changed {
-		t.Fatal("expected the stub to be replaced")
+	if changed {
+		t.Fatalf("a caller's own read definition was rewritten:\n%s", out)
 	}
 	payload := decode(t, out)
-	if names := toolNames(t, payload); len(names) != 1 {
+	if names := toolNames(t, payload); len(names) != 1 || names[0] != "read" {
 		t.Fatalf("want exactly [read], got %v", names)
 	}
-	if desc := defOf(t, payload, "read"); desc != c["read"].Description {
-		t.Fatalf("stub read survived: %q", desc)
+	if desc := defOf(t, payload, "read"); desc != "Read a file." {
+		t.Fatalf("caller's read definition was replaced: %q", desc)
 	}
 }
 
-func TestReplacesRecognisedNonCoreName(t *testing.T) {
+// A catalogue name that is not "read" is no more special than any other client
+// tool: the gate does not look at definitions at all.
+func TestKeepsClientDeclaredRecognisedName(t *testing.T) {
 	c := testCatalogue()
 	body := []byte(`{"model":"m","stream":true,"tools":[{"type":"function","function":{"name":"shell","description":"agent tool shell","parameters":{"type":"object","properties":{}}}}]}`)
 	out, _ := prepareBody(body, true, c)
-	if desc := defOf(t, decode(t, out), "shell"); desc != c["shell"].Description {
-		t.Fatalf("recognised name kept its stub: %q", desc)
+	if desc := defOf(t, decode(t, out), "shell"); desc != "agent tool shell" {
+		t.Fatalf("recognised name was rewritten: %q", desc)
+	}
+}
+
+// OpenCode's title generator sends a system prompt that names itself and bans
+// tool use. The pair is what the gate rejects; rewording the ban leaves the
+// rest of the prompt, including its examples block, intact.
+func TestRewordsTitleGeneratorToolBan(t *testing.T) {
+	c := testCatalogue()
+	title := "You are a title generator. You output ONLY a thread title.\n\n<rules>\n- Never use tools\n- Keep exact: filenames\n</rules>\n"
+	body := []byte(`{"model":"m","stream":true,"messages":[` +
+		`{"role":"system","content":` + strconv.Quote(title) + `},` +
+		`{"role":"user","content":"Generate a title for this conversation:"},` +
+		`{"role":"user","content":"what is 2+2"}]}`)
+	out, changed := prepareBody(body, true, c)
+	if !changed {
+		t.Fatal("expected the title prompt to be reworded")
+	}
+	payload := decode(t, out)
+	messages, _ := payload["messages"].([]any)
+	content, _ := messages[0].(map[string]any)["content"].(string)
+	if strings.Contains(content, "Never use tools") {
+		t.Fatalf("the blocked phrase survived: %q", content)
+	}
+	if !strings.Contains(content, "You are a title generator") {
+		t.Fatalf("the prompt was rewritten more than it had to be: %q", content)
+	}
+	if !strings.Contains(content, "Keep exact: filenames") || !strings.Contains(content, "<rules>") {
+		t.Fatalf("the rest of the prompt was damaged: %q", content)
+	}
+}
+
+// A system prompt carrying only one half of the pair is left alone: the gate
+// accepts those on its own, and rewriting them would touch prompts that were
+// never a problem.
+func TestLeavesHalfOfTheBlockedPairAlone(t *testing.T) {
+	c := testCatalogue()
+	for _, only := range []string{
+		"You are a title generator.",
+		"Always answer in the user's language.\n- Never use tools",
+	} {
+		body := []byte(`{"model":"m","stream":true,"tools":[{"type":"function","function":{"name":"read"}}],"messages":[{"role":"system","content":` +
+			strconv.Quote(only) + `}]}`)
+		out, changed := prepareBody(body, true, c)
+		if changed {
+			t.Fatalf("rewrote a prompt that only carries half the pair: %q -> %s", only, out)
+		}
+	}
+}
+
+// A user turn that happens to carry the phrase is not a system prompt and is
+// left untouched.
+func TestDoesNotRewriteUserTurns(t *testing.T) {
+	c := testCatalogue()
+	body := []byte(`{"model":"m","stream":true,"tools":[{"type":"function","function":{"name":"read"}}],"messages":[{"role":"user","content":"You are a title generator. Never use tools."}]}`)
+	out, changed := prepareBody(body, true, c)
+	if changed {
+		t.Fatalf("a user turn was rewritten: %s", out)
 	}
 }
 

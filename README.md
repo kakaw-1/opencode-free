@@ -12,12 +12,14 @@ Configure OpenCode as an `api-keys.openai-compatibility` provider in CPA and eve
 HTTP 403  FreeTierError
 ```
 
-The URL is right, and headers alone do not get you in. The gate wants both halves: the OpenCode headers (a CPA provider config supplies those) **and** a streaming body carrying OpenCode's official `read` tool definition, byte for byte. Ablated against the real upstream on 2026-10-15: headers without the tool definition → 403, tool definition without the headers → 403, both → 200. A CPA provider config has no way to touch the body, so a plugin is the only seam.
+The URL is right, and headers alone do not get you in. The gate wants both halves: the OpenCode headers (a CPA provider config supplies those) **and** a streaming body whose tool list contains an entry named `read`. Ablated against the real upstream on 2026-10-16: headers without `read` → 403, `read` without the headers → 403, both → 200. A CPA provider config has no way to touch the body, so a plugin is the only seam.
+
+What that `read` entry *says* does not matter. A one-line stub with an invented description and schema returns 200; ten genuine OpenCode tools with no `read` among them return 403. An earlier version of this page claimed the definition had to match the official one byte for byte — that measurement was taken through the plugin, which replaced the stub before the request left CPA, so the upstream only ever saw the real definition. Measured directly against the upstream, the name is the whole test.
 
 Bringing your own tools does not exempt you from that. Codex CLI sends nine of
 its own on every request (`exec_command`, `write_stdin`, `view_image`, …); sent
-to the upstream as-is they still return 403, and only adding the official `read`
-gets a 200. There is no "client already has tools, skip the injection" shortcut,
+to the upstream as-is they still return 403, and only adding a `read` entry gets
+a 200. There is no "client already has tools, skip the injection" shortcut,
 which is why the injected `read` can always be chosen by the model.
 
 ## What this does
@@ -26,9 +28,9 @@ Declares one capability (`request_interceptor`) on the `request.intercept_after`
 
 0. Credential is not one of the selected `providers` (or the model does not match `models`) → **passed through untouched**
 1. `stream != true` → set to `true`
-2. `tools` missing or without `read` → append the official `read` definition
-3. A `tools` entry shadows one of the 12 known OpenCode tool names but differs from the official definition → replaced
-4. Every other tool is left alone, so downstream function calling still works
+2. `tools` missing or without `read` → append the official `read` definition; a caller that declares its own `read` is left byte for byte alone
+3. A system prompt carrying both `You are a title generator` and `Never use tools` → the tool ban is reworded to the equivalent `Do not call any tools`, nothing else in the prompt is touched
+4. Everything else is left alone, so downstream function calling still works
 
 The rewrite is idempotent: a request that is already valid is not modified or re-encoded.
 
@@ -128,13 +130,13 @@ and `changed` say whether the plugin did its part.
 
 ## The tool definitions are not in this repo
 
-The gate compares the `read` definition byte for byte, so the plugin has to send the official one. That data is OpenCode's: the copy this was verified against came from [opencode2api](https://github.com/jasonxu114514/opencode2api), which is **GPL-3.0-or-later**, and this plugin is **MIT**. Bundling it would make the `.so` a redistribution of GPL data.
+The gate only checks that an entry named `read` exists, so a stub would pass it. The plugin sends the official definition anyway because the model really does call the injected tool, and a real description plus schema steers its arguments; the catalogue data is OpenCode's, and the copy this was verified against came from [opencode2api](https://github.com/jasonxu114514/opencode2api), which is **GPL-3.0-or-later**, while this plugin is **MIT**. Bundling it would make the `.so` a redistribution of GPL data.
 
 So the plugin downloads and caches it at registration instead — one fetch, reused for a day, falling back to the cached copy when offline. Point `tools-file` at a local copy (`./fetch-tools.sh` writes one) to skip the network entirely. CI asserts the binary contains no tool definitions.
 
 ## Status
 
-Reverse engineered and verified end to end against real CPA and the real upstream on 2026-10-15. The gate is not a documented contract and has changed twice already (2026-09-16, 2026-10-14) — if requests start returning 403, delete the cached catalogue and restart; no rebuild needed.
+Reverse engineered and verified end to end against real CPA and the real upstream on 2026-10-15 and 2026-10-16. The gate is not a documented contract and has changed twice already (2026-09-16, 2026-10-14) — if requests start returning 403, delete the cached catalogue and restart; no rebuild needed.
 
 One red herring, because it is the first thing anyone clicks: the management
 panel's per-provider **Test** button always fails for this provider. It posts to
@@ -163,10 +165,39 @@ it is 12/12, with an agentic client system prompt 11/12, with both 12/12.
 Hardening the wording ("every call to `read` returns an error, use a shell
 command instead") changed nothing: 10/10 and 9/9. The tools array is hard
 evidence that the tool exists, the client's own "you have tools, use them"
-prompt reinforces it, and a single soft line loses against both. The gate
-compares `read`'s definition byte for byte, so free text is the plugin's only
-lever — and the weakest one. Telling the model `read` is broken unconditionally
-would also break clients that declare and implement their own `read`.
+prompt reinforces it, and a single soft line loses against both. Free text is
+the plugin's only lever here, and the weakest one. Telling the model `read` is
+broken unconditionally would also break clients that declare and implement
+their own `read`.
+
+## What running the real client turned up
+
+Pointing a real OpenCode 1.18.35 at CPA (model `deepseek-v4.1-flash-free`) and
+recording every outbound request between CPA and the upstream found two failures
+that no amount of reasoning about the gate had surfaced.
+
+**The title-generation prompt is blocklisted.** OpenCode sends one title request
+per session to its small model. The gate rejects it when the system prompt
+carries *both* `You are a title generator` and `Never use tools` — either one
+alone passes, and the full 2096-character prompt fails while a 90-character
+concatenation of just those two lines also fails. Rewording either phrase
+restores 200 with the rest of the prompt intact. The plugin now rewrites only
+the tool-ban sentence. OpenCode's other system prompts (context compaction, sub
+agents, code review) pass as-is.
+
+**The plugin was breaking the client's own tool contract.** OpenCode 1.18.35's
+`read` takes `filePath`; the cached 2.0.29 definition takes `path`. Replacing the
+caller's definition made the model call `read` with `path`, and the client
+answered
+`SchemaError(Missing key at ["filePath"]). Please rewrite the input so it
+satisfies the expected schema.` — a wasted turn before the model fell back to
+`cat`. Since the gate never looks at the definition, the plugin now only ensures
+an entry named `read` exists and leaves the caller's definitions alone.
+
+With both fixed, 20 real sessions through CPA produced **62/62 `200`** upstream
+requests with no `SchemaError`, and 150 replayed requests built from the exact
+bodies that used to fail returned **150/150**. Before the fix the same setup
+managed 9/12, with all three title requests at 403.
 
 The store path is verified too, not just the source build: the published
 artifact was installed through CPA's own

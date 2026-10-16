@@ -67,9 +67,9 @@ func TestFetchedCatalogueIsUsable(t *testing.T) {
 		t.Fatal("fetched catalogue has no read definition")
 	}
 	if strings.TrimSpace(read.Description) == "" {
-		t.Error("read definition has an empty description; the gate compares it byte for byte")
+		t.Error("read definition has an empty description; the model gets this text, so it has to say what the tool does")
 	}
 	if len(read.Parameters) == 0 {
-		t.Error("read definition has no parameters; the gate compares them byte for byte")
+		t.Error("read definition has no parameters; the model gets this schema, so it cannot be empty")
 	}
 }

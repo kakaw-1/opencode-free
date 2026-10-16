@@ -8,7 +8,7 @@
 HTTP 403  FreeTierError
 ```
 
-原因不是 URL 写错。闸门同时看 **header 和请求体**：header 那一半 CPA 的供应商配置就能满足（见下表），另一半——请求体必须 `stream: true` 且带**官方原版** `read` 工具定义——供应商配置**没有注入 body 的能力**，所以这件事只能靠插件。
+原因不是 URL 写错。闸门同时看 **header 和请求体**：header 那一半 CPA 的供应商配置就能满足（见下表），另一半——请求体必须 `stream: true` 且工具列表里有一个**名为 `read` 的条目**——供应商配置**没有注入 body 的能力**，所以这件事只能靠插件。
 
 2026-10-15 对 `https://opencode.ai/inference` 做消融，两边都不能省：
 
@@ -25,9 +25,9 @@ HTTP 403  FreeTierError
 
 **"客户端自带工具"不能免掉注入**（2026-10-16 补测）。闸门要的是那条官方 `read` 本身，不是"有没有工具"：Codex CLI 一次请求会带 9 件自己的工具，把它们原样发上去照样 403，加上 `read` 才 200。所以插件没有"客户端已有工具就不注入"这条捷径可走，注入的 `read` 也就永远有机会被模型调用。
 
-## 闸门配方（2026-10-15 直接对 `https://opencode.ai/inference` 实测）
+## 闸门配方（2026-10-16 直接对 `https://opencode.ai/inference/v1` 实测）
 
-测试模型 `mimo-v2.6-flash-free`。用消融法逐项验证：
+测试模型 `deepseek-v4.1-flash-free`、`cat-jam-free`、`mimo-v2.6-flash-free`，三者结论一致。用消融法逐项验证：
 
 **必需：**
 
@@ -38,7 +38,7 @@ HTTP 403  FreeTierError
 | `x-opencode-client` | `cli` |
 | `x-opencode-session` 与 `x-opencode-session-id` | 相同，形如 `ses_[0-9a-f]{12}[0-9A-Za-z]{14}` |
 | `stream` | 必须为 `true`——`false` 或省略都 403，上游一律回 SSE |
-| `tools` | 必须含**官方原版** `read` 定义 |
+| `tools` | 必须含**名为 `read` 的条目**——闸门不看它的定义内容 |
 
 **不需要：** `stream_options`、`x-opencode-project`、`x-session-affinity`、`X-Session-Id`。
 
@@ -47,9 +47,42 @@ HTTP 403  FreeTierError
 - `/v1/models` **不受闸门保护**，裸请求也回 200——拿它验证"通了没有"是无效的，必须打推理端点。
 - **管理面板里那个"测试"按钮永远红。** 它走 `POST /v0/management/api-call`，也就是**管理面**，插件钩子不会被调用；它发的请求体是 `{"messages":[{"role":"user","content":"Hi"}],"stream":false,"max_tokens":5}`，`stream:false` 加没有 `tools` 又正好踩中闸门的两条。所以 opencode 供应商在这里报 `403 FreeTierError` 是预期结果，既不代表插件坏了，也不代表免费层不能用。唯一判据是数据面的 `/v1/chat/completions` 加上 debug-log 里的 `decision`。
 - 闸门**按模型区分**：免费模型走指纹检查，付费模型（`glm-5.3` 等）返回的是 401 `AuthError`。
-- 名字对不够，定义必须**逐字节**是官方那份。带正确名字的桩定义一样 403。
-- 12 个已识别名字里，**单独发只有 `read` 能过**；但 `read` + 任意未知工具可以过。
+- 名字对就够，定义随便：一个 description 写 "Read a file."、schema 只有 `{"path":{"type":"string"}}` 的桩一样过；反过来，把 opencode 那 10 个真工具原样发上去、唯独不带 `read`，照样 403。`read` 单独一个能过，`read` + 任意未知工具也能过。
+- 2026-10-15 记的"定义必须逐字节是官方那份"是**错的**。那次测量走了插件，而插件在中间把桩定义替换成了真定义，上游看到的一直是真货——是插件把自己的测试对象换掉了。绕开插件直连上游才看出来闸门只认名字。
 - session id 可以是**常量**，跨请求复用即可。per-conversation 铸造只影响 prompt cache 亲和性，与过闸无关。
+
+## 用真实 opencode 抓包发现的两种失败
+
+把本机自带的 opencode 1.18.35（`~/.codeg` 那套 ACP 二进制）的 `opencode` 供应商 baseURL 指到 CPA，模型 `deepseek-v4.1-flash-free`，在 CPA 与上游之间记录每一个出站请求。这样既能看到客户端的原始请求，也能看到插件改写后真正发出去的东西。
+
+第一次跑三个会话就抓到 12 个出站请求，其中 3 个 403。两种形态：
+
+| 形态 | 修复前 | 修复后 |
+|---|---|---|
+| agent 请求（`system` + `user`，11 个工具） | 200 | 200 |
+| 标题生成请求（`system` + `user` + `user`，只有注入的 `read`） | **403 `FreeTierError`** | 200 |
+
+**第一种失败：标题生成提示被闸门拉黑。** opencode 每次会话都会发一条标题生成请求给它的 small model，系统提示以 `You are a title generator` 开头，规则里有一条 `Never use tools`。闸门拒它的条件是这两段文字**同时**出现：
+
+| 系统提示 | 结果 |
+|---|---|
+| `You are a title generator.` 单独 | 200 |
+| `- Never use tools` 单独 | 200 |
+| 上面两句拼起来（90 字符） | **403** |
+| 完整标题提示（2096 字符） | **403** |
+| 完整提示，但把 `Never use tools` 换成 `Do not call any tools` | 200 |
+| 完整提示，但把 `You are a title generator` 换成 `You write conversation titles` | 200 |
+
+换个说法就恢复 200，其余部分（任务说明、`<rules>`、`<examples>`）一个字都不用动。所以插件只在检测到这一对同时出现时，把禁令那句改写成同义的 `Do not call any tools`，标题生成的行为不变。opencode 其余几条系统提示（上下文压缩、子 agent、代码评审）都直接放行，不需要处理。
+
+**第二种失败：插件自己把客户端的工具契约改坏了。** opencode 1.18.35 的 `read` 参数叫 `filePath`，缓存里那份 2.0.29 的定义叫 `path`。插件原来会把客户端声明的已识别名字替换成缓存版，于是模型照着 `path` 调用，客户端回：
+
+```
+The read tool was called with invalid arguments: SchemaError(Missing key at ["filePath"]).
+Please rewrite the input so it satisfies the expected schema.
+```
+
+模型只好改用 shell `cat` 兜底，一轮请求白跑，墙钟也变长。既然闸门根本不看定义，插件现在只保证"工具列表里存在名为 `read` 的条目"，客户端自己声明的定义一个字节都不碰。
 
 ## 插件如何判断"这是要改的请求"
 
@@ -143,9 +176,9 @@ curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
 
 0. 凭据不属于 `providers` 里选中的组（或模型不匹配 `models`）→ **原样放行**
 1. `stream != true` → 置为 `true`
-2. `tools` 缺失或不含 `read` → 追加官方 `read` 定义
-3. `tools` 里出现 12 个已识别名字中的任何一个 → 若定义与官方不一致，替换为官方定义
-4. 其余工具**原样放行**，下游 function calling 不受影响
+2. `tools` 缺失或不含 `read` → 追加官方 `read` 定义；已经含 `read` → **一个字节都不动**（闸门不看定义内容，而替换会改坏客户端自己的工具契约）
+3. 系统提示里**同时**出现 `You are a title generator` 和 `Never use tools` → 把禁令那句改写成同义的 `Do not call any tools`，提示的其余部分原样保留
+4. 其余内容**原样放行**，下游 function calling 不受影响
 
 改写是**幂等**的：对已经合规的请求不做任何改动，不会重编码 JSON。
 
@@ -160,12 +193,12 @@ curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
 
 ## 已知风险（接受）
 
-- **注入的 `read` 会真的被调用。** 文件类/agent 类提示词的请求实测 **17/17** 都触发了 `read` 调用（`finish_reason: tool_calls`），普通对话提示词 **7/7** 不触发。这 17 次里 **14 次 content 为空**，只有 3 次带 28–90 字符的正文。客户端自己声明了工具也拦不住——模型会挑注入的 `read`，而不是客户端那件工具（3/3）。这个 `tool_use` 会作为下游客户端从未声明过的工具调用送达。
+- **注入的 `read` 会真的被调用。** 文件类/agent 类提示词的请求实测 **17/17** 都触发了 `read` 调用（`finish_reason: tool_calls`），普通对话提示词 **7/7** 不触发。这 17 次里 **14 次 content 为空**，只有 3 次带 28–90 字符的正文。这个 `tool_use` 会作为下游客户端从未声明过的工具调用送达。**客户端自己声明了 `read` 的话这条风险基本消失**：模型调到的是客户端自己的工具，参数名也对得上（opencode 1.18.35 实测，修复后 20 个会话零 `SchemaError`）。没声明 `read` 的客户端（Codex CLI 就是）仍然会收到这个它没声明过的调用。
 - **`tool_choice: "none"` 不是可靠的堵法。** `cat-jam-free` 5/5 遵守（不再产生 tool call，但 content 仍然常常为空）、`nemotron-3.5-lightning-free` 1/1 遵守，而 `step-5-preview-free` 3/3 **直接忽略**，照样回 tool call。在请求里塞一句"你没有工具"的系统提示也一样无效（2/2 仍然调用）。所以这是**按模型而异**的，不能当作通用开关。
 - **真实 agent 会被这个 tool call 绊一下，但能自愈。** Codex CLI 收到它之后工具路由直接报 `ERROR codex_core::tools::router: error=unsupported call: read`，然后自己退回 shell `cat` 把活干完。6 个 agent 并发问"读 /etc/hostname"：4/6 撞上这个错误（共 5 次），上游请求数从普通对话的 6 次涨到 **16 次**，墙钟从 ~11s 涨到 15–25s。最终 6/6 都答对了，代价是多花了一轮请求。
 - **非流式下游请求会坏。** 上游强制 SSE，本插件不设保护，放行让它坏。
 - **常量 session id 在 6 路并发下没有被限流**（2026-10-16 实测）。6 个真实 agent（Codex CLI，`wire_api=responses` → CPA `/v1/responses` → 插件 → 上游）共用同一个常量 `x-opencode-session`，连跑 3 轮共 18 次请求，全部 `200`、零 `429`；延迟 1.35–3.18s，没有随并发上升，第 3 轮反而最快。串行对照（同样 6 条提示词）延迟 1.67–37.05s，尾部更差。注意这是**单模型、当天配额、6 路**的观测，不等于任何并发规模都不会限流。
-- **闸门会变。** 2026-09-16 和 2026-10-14 都改过（后者加了逐字节定义比对）。工具定义不内嵌，是运行时获取的——删掉缓存（或重跑 `fetch-tools.sh`）再重启即可，不用重新编译。
+- **闸门会变。** 2026-09-16 和 2026-10-14 都改过。工具定义不内嵌，是运行时获取的——删掉缓存（或重跑 `fetch-tools.sh`）再重启即可，不用重新编译。
 
 ## 安装
 
@@ -395,6 +428,23 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 免责声明 + 客户端自带工具 + 客户端自己的 agent 系统提示 | **12/12（100%）** |
 | 拆开两个因素（都带免责声明） | 无工具无系统提示 5/12；有工具无系统提示 12/12；无工具有系统提示 11/12；有工具有系统提示 12/12 |
 | 升级措辞（明说"调用必然失败、请改用 shell 读文件"）且客户端带工具 | 仍然无效：有工具无系统提示 10/10、有工具有系统提示 9/9 |
+| 直连上游（绕开插件）测 `read` 的定义要求：桩定义单独一个 | `200` |
+| 同上：opencode 1.18.35 真定义（`filePath`）单独一个 | `200` |
+| 同上：opencode 那 10 个真工具、唯独没有 `read` | `403 FreeTierError` |
+| 同上：`read` 之外只有 `bash`／`todowrite`／`webfetch` 之一 | `403 FreeTierError` |
+| 直连上游测标题提示：`You are a title generator.` 单独 | `200` |
+| 同上：`- Never use tools` 单独 | `200` |
+| 同上：两句拼起来（90 字符） | `403 FreeTierError` |
+| 同上：完整标题提示（2096 字符） | `403 FreeTierError` |
+| 同上：完整提示，`Never use tools` → `Do not call any tools` | `200` |
+| 同上：完整提示，`You are a title generator` → `You write conversation titles` | `200` |
+| 同上：opencode 其余系统提示（上下文压缩／子 agent／代码评审） | 全部 `200`，无需处理 |
+| **真实 opencode 1.18.35 → CPA → 插件 → 上游，修复前**（3 个会话 12 个出站请求） | `9/12`，3 条标题生成请求全部 `403` |
+| **同上，修复后**（20 个会话，直连上游不经代理，从 CPA 访问日志统计） | **`62/62` `200`**，20/20 会话退出码 0，零 `SchemaError` |
+| 同上（另 20 个会话，经转发代理统计出站状态） | **`58/58` `200`**（20 条标题 + 38 条 agent） |
+| 同上（首批 5 个会话） | `17/17` `200`（5 条标题 + 12 条 agent） |
+| 12 个 opencode 进程同时起（两轮 6 路并发） | 上游 `16/16` `200`；7 个进程在发请求**之前**就退出，报的是 opencode 自己的 `database is locked`（共用一个 `opencode.db`），与插件和上游无关 |
+| 大样本回放：修复前会 403 的标题 body ×60 + 客户端原始 agent body（`filePath` 版 `read`）×90 | **`150/150` `200`** |
 
 即：403 确实由本插件消除，改写范围严格限定在选中的供应商内，且二进制里不含 GPL 数据。
 
@@ -414,13 +464,13 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 
 对照组（同一批提示词、同一批模型、什么都不加）是 18/18 触发。也就是说免责声明在无工具场景下能把触发率从 100% 压到一两成，但只要请求里有客户端自己的工具、或者有客户端自己的 agent 系统提示，触发率回到 100%。Codex CLI 和 Claude Code 两条都占。
 
-原因不复杂：`tools` 数组是"这个工具确实存在"的硬证据，一句系统提示只是软约束，两者冲突时模型信前者；客户端自己的 agent 提示会再强化一遍。而闸门要求 `read` 的定义与官方**逐字节**一致，插件能加自由文本的地方只剩系统提示，恰好是最弱的那条通道。
+原因不复杂：`tools` 数组是"这个工具确实存在"的硬证据，一句系统提示只是软约束，两者冲突时模型信前者；客户端自己的 agent 提示会再强化一遍。而插件不能删掉那个 `read`（闸门要求它在），能加自由文本的地方只剩系统提示，恰好是最弱的那条通道。
 
-无条件加这条声明还有个副作用：客户端自己声明了 `read` 并且真的实现它时（OpenCode 本尊就属于这种，插件会把那份定义替换成官方版、模型照着调是好用的），再告诉模型"read 不可用"就是实打实的功能回归。
+无条件加这条声明还有个副作用：客户端自己声明了 `read` 并且真的实现它时（OpenCode 本尊就属于这种，插件现在原样保留它的定义、模型照着调是好用的），再告诉模型"read 不可用"就是实打实的功能回归。
 
 ## 工具定义数据（不在本仓库里）
 
-`opencode_tools.json` 是 OpenCode 官方 CLI 的 12 个工具定义（description + JSON Schema）。闸门做**逐字节**比对，所以必须是官方那份，名字对、内容不对一样 403。
+`opencode_tools.json` 是 OpenCode 官方 CLI 的 12 个工具定义（description + JSON Schema）。**闸门并不比对它**——闸门只看有没有名为 `read` 的条目（2026-10-16 实测）。保留官方那份是因为注入进去的工具模型**真的会调**，官方描述和 schema 能把它引导对；换个随手编的桩虽然同样过闸，但会让模型更容易乱填参数。
 
 **这份文件不随本仓库分发，插件也不内嵌它。** 原因：它的副本来自 `opencode2api`，而那个仓库是 **GPL-3.0-or-later**；本插件是 MIT。把文件放进仓库或编进 `.so`，等于在分发 GPL 数据，MIT 就名不副实了。
 
