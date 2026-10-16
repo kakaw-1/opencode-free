@@ -199,6 +199,13 @@ requests with no `SchemaError`, and 150 replayed requests built from the exact
 bodies that used to fail returned **150/150**. Before the fix the same setup
 managed 9/12, with all three title requests at 403.
 
+The free quota is pooled per model, and the plugin cannot see it. Once
+`deepseek-v4.1-flash-free` was driven into the limit by all that testing, it
+answered `429 FreeUsageLimitError` for over 40 seconds of retries with no
+`Retry-After` to work from, while `cat-jam-free` kept returning 200. A plugin
+that only rewrites request bodies cannot retry or switch models; handle that
+layer in CPA's `routing.retry`, or use a model with quota left.
+
 The store path is verified too, not just the source build: the published
 artifact was installed through CPA's own
 `POST /v0/management/plugin-store/:id/install` into a clean plugin directory,

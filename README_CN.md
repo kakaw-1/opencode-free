@@ -198,6 +198,7 @@ curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
 - **真实 agent 会被这个 tool call 绊一下，但能自愈。** Codex CLI 收到它之后工具路由直接报 `ERROR codex_core::tools::router: error=unsupported call: read`，然后自己退回 shell `cat` 把活干完。6 个 agent 并发问"读 /etc/hostname"：4/6 撞上这个错误（共 5 次），上游请求数从普通对话的 6 次涨到 **16 次**，墙钟从 ~11s 涨到 15–25s。最终 6/6 都答对了，代价是多花了一轮请求。
 - **非流式下游请求会坏。** 上游强制 SSE，本插件不设保护，放行让它坏。
 - **常量 session id 在 6 路并发下没有被限流**（2026-10-16 实测）。6 个真实 agent（Codex CLI，`wire_api=responses` → CPA `/v1/responses` → 插件 → 上游）共用同一个常量 `x-opencode-session`，连跑 3 轮共 18 次请求，全部 `200`、零 `429`；延迟 1.35–3.18s，没有随并发上升，第 3 轮反而最快。串行对照（同样 6 条提示词）延迟 1.67–37.05s，尾部更差。注意这是**单模型、当天配额、6 路**的观测，不等于任何并发规模都不会限流。
+- **免费额度是按模型分池的，打满之后这个模型会持续 `429 FreeUsageLimitError`。** 这次实测里 `deepseek-v4.1-flash-free` 被打到限流后，重试 40 秒以上仍然是 429，而上游**不回 `Retry-After`**，所以恢复时间只能靠试；同一时刻 `cat-jam-free`、`step-5-preview-free` 照常 `200`。这是插件管不到的一层——它只改请求体，看不到响应，没法重试或换模型。真要在额度打满后继续用，得在 CPA 侧配 `routing.retry`，或者换一个还没打满的模型。
 - **闸门会变。** 2026-09-16 和 2026-10-14 都改过。工具定义不内嵌，是运行时获取的——删掉缓存（或重跑 `fetch-tools.sh`）再重启即可，不用重新编译。
 
 ## 安装
@@ -445,6 +446,8 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 同上（首批 5 个会话） | `17/17` `200`（5 条标题 + 12 条 agent） |
 | 12 个 opencode 进程同时起（两轮 6 路并发） | 上游 `16/16` `200`；7 个进程在发请求**之前**就退出，报的是 opencode 自己的 `database is locked`（共用一个 `opencode.db`），与插件和上游无关 |
 | 大样本回放：修复前会 403 的标题 body ×60 + 客户端原始 agent body（`filePath` 版 `read`）×90 | **`150/150` `200`** |
+| 把模型换成 `cat-jam-free` 再跑 5 个真实会话 | `13/13` `200`，5/5 会话退出码 0，零 `SchemaError`——修复与模型无关 |
+| 免费额度是按模型分池的：把 `deepseek-v4.1-flash-free` 打到限流后再测 | `deepseek-v4.1-flash-free` 与 `mimo-v2.6-flash-free` 持续 `429 FreeUsageLimitError`，同一时刻 `cat-jam-free`、`step-5-preview-free` 仍 `200`；上游不回 `Retry-After` |
 
 即：403 确实由本插件消除，改写范围严格限定在选中的供应商内，且二进制里不含 GPL 数据。
 
