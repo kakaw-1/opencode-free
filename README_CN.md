@@ -8,7 +8,7 @@
 HTTP 403  FreeTierError
 ```
 
-原因不是 URL 写错。闸门同时看 **header 和请求体**：header 那一半 CPA 的供应商配置就能满足（见下表），另一半——请求体必须 `stream: true` 且工具列表里有一个**名为 `read` 的条目**——供应商配置**没有注入 body 的能力**，所以这件事只能靠插件。
+原因不是 URL 写错。闸门同时看 **header 和请求体**：header 那一半 CPA 的供应商配置就能满足（见下表；会话 id 那一对的值由插件按会话给出，见「会话身份」），另一半——请求体必须 `stream: true` 且工具列表里有一个**名为 `read` 的条目**——供应商配置**没有注入 body 的能力**，所以这件事只能靠插件。
 
 2026-10-15 对 `https://opencode.ai/inference` 做消融，两边都不能省：
 
@@ -49,7 +49,7 @@ HTTP 403  FreeTierError
 - 闸门**按模型区分**：免费模型走指纹检查，付费模型（`glm-5.3` 等）返回的是 401 `AuthError`。
 - 名字对就够，定义随便：一个 description 写 "Read a file."、schema 只有 `{"path":{"type":"string"}}` 的桩一样过；反过来，把 opencode 那 10 个真工具原样发上去、唯独不带 `read`，照样 403。`read` 单独一个能过，`read` + 任意未知工具也能过。
 - 2026-10-15 记的"定义必须逐字节是官方那份"是**错的**。那次测量走了插件，而插件在中间把桩定义替换成了真定义，上游看到的一直是真货——是插件把自己的测试对象换掉了。绕开插件直连上游才看出来闸门只认名字。
-- session id 可以是**常量**，跨请求复用即可。per-conversation 铸造只影响 prompt cache 亲和性，与过闸无关。
+- session id 可以是**常量**，跨请求复用即可——闸门不要求每个会话一个 id。本插件仍然按会话铸 id（见「会话身份」），那是为了上游 prompt cache 亲和性，与过闸无关。
 
 ## 用真实 opencode 抓包发现的两种失败
 
@@ -165,20 +165,21 @@ curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
 排障用 `debug-log`，每次拦截追加一行 JSON，`decision` 会说明为什么没命中：
 
 ```json
-{"decision":"rewrite","changed":true,"selected_auth_id":"openai-compatibility:opencode:6df7070a759c","model":"mimo-v2.6-flash-free","requested_model":"mimo-free","source_format":"openai","to_format":"openai","stream":false}
+{"decision":"rewrite","changed":true,"selected_auth_id":"openai-compatibility:opencode:6df7070a759c","session_id":"ses_ebb845922ffeF2rweg6yrQX9gL","model":"mimo-v2.6-flash-free","requested_model":"mimo-free","source_format":"openai","to_format":"openai","stream":false}
 ```
 
-`decision` 的取值：`rewrite` / `skip:no-selection`（没配 `providers`）/ `skip:provider` / `skip:model` / `skip:not-registered`。
+`decision` 的取值：`rewrite` / `skip:no-selection`（没配 `providers`）/ `skip:provider` / `skip:model` / `skip:not-registered`。`session_id` 是这次写进那对会话头的值（没写就是空串）——排查"客户端发的会话是不是被认出来了"看它。
 
 ## 本插件做什么
 
 声明 `request_interceptor` 一项能力，挂在 `request.intercept_after` 钩子上：
 
-0. 凭据不属于 `providers` 里选中的组（或模型不匹配 `models`）→ **原样放行**
-1. `stream != true` → 置为 `true`
-2. `tools` 缺失或不含 `read` → 追加官方 `read` 定义；已经含 `read` → **一个字节都不动**（闸门不看定义内容，而替换会改坏客户端自己的工具契约）
-3. 系统提示里**同时**出现 `You are a title generator` 和 `Never use tools` → 把禁令那句改写成同义的 `Do not call any tools`，提示的其余部分原样保留
-4. 其余内容**原样放行**，下游 function calling 不受影响
+0. 凭据不属于 `providers` 里选中的组 → **原样放行**，body 与 header 一个字节都不动
+1. 属于选中的组 → 把 `x-opencode-session` / `x-opencode-session-id` 写成**这次会话**的 id（见「会话身份」）；模型不匹配 `models` 的请求到此为止，body 不动
+2. `stream != true` → 置为 `true`
+3. `tools` 缺失或不含 `read` → 追加官方 `read` 定义；已经含 `read` → **一个字节都不动**（闸门不看定义内容，而替换会改坏客户端自己的工具契约）
+4. 系统提示里**同时**出现 `You are a title generator` 和 `Never use tools` → 把禁令那句改写成同义的 `Do not call any tools`，提示的其余部分原样保留
+5. 其余内容**原样放行**，下游 function calling 不受影响
 
 改写是**幂等**的：对已经合规的请求不做任何改动，不会重编码 JSON。
 
@@ -186,8 +187,7 @@ curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
 
 **不做的（按决定刻意不做）：**
 
-- 不改任何 header。指纹 header 由 CPA 配置里的 `headers:` 提供（见下）。
-- 不碰 `Authorization`，由 CPA 的 `api-key: public` 提供。
+- 除了上面那对会话头，**不改任何 header**。`User-Agent` / `x-opencode-client` 由 CPA 配置里的 `headers:` 提供，`Authorization` 由 `api-key: public` 提供。官方客户端会发的 `x-session-affinity` / `X-Session-Id` / `x-opencode-project` / `x-parent-session-id` 不发——闸门不看（见开头「不需要」表）。
 - 不做响应侧处理。**剥离注入 `read` 产生的 tool call，收益太窄，不值这个代价**（2026-10-15 实测）：17 次泄漏里 14 次 content 本来就是空的，剥完用户拿到的还是空回复；只有 3 次能保住 28–90 字符的正文。代价却是逐 chunk 的热路径钩子（`response.intercept_stream_chunk` + `DropChunk`）加每请求状态，还要把 `finish_reason` 从 `tool_calls` 改写掉。收益窄、成本在热路径上，所以不做。
 - **不做 opencode2api 的 phantom guard**（`usableToolBlocks` + `finish_reason` 降级）。
 
@@ -197,7 +197,7 @@ curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
 - **`tool_choice: "none"` 不是可靠的堵法。** `cat-jam-free` 5/5 遵守（不再产生 tool call，但 content 仍然常常为空）、`nemotron-3.5-lightning-free` 1/1 遵守，而 `step-5-preview-free` 3/3 **直接忽略**，照样回 tool call。在请求里塞一句"你没有工具"的系统提示也一样无效（2/2 仍然调用）。所以这是**按模型而异**的，不能当作通用开关。
 - **真实 agent 会被这个 tool call 绊一下，但能自愈。** Codex CLI 收到它之后工具路由直接报 `ERROR codex_core::tools::router: error=unsupported call: read`，然后自己退回 shell `cat` 把活干完。6 个 agent 并发问"读 /etc/hostname"：4/6 撞上这个错误（共 5 次），上游请求数从普通对话的 6 次涨到 **16 次**，墙钟从 ~11s 涨到 15–25s。最终 6/6 都答对了，代价是多花了一轮请求。
 - **非流式下游请求会坏。** 上游强制 SSE，本插件不设保护，放行让它坏。
-- **常量 session id 在 6 路并发下没有被限流**（2026-10-16 实测）。6 个真实 agent（Codex CLI，`wire_api=responses` → CPA `/v1/responses` → 插件 → 上游）共用同一个常量 `x-opencode-session`，连跑 3 轮共 18 次请求，全部 `200`、零 `429`；延迟 1.35–3.18s，没有随并发上升，第 3 轮反而最快。串行对照（同样 6 条提示词）延迟 1.67–37.05s，尾部更差。注意这是**单模型、当天配额、6 路**的观测，不等于任何并发规模都不会限流。
+- **限流看起来不按 session 走。** 2026-10-16 实测：6 个真实 agent（Codex CLI，`wire_api=responses` → CPA `/v1/responses` → 插件 → 上游）共用同一个**常量** `x-opencode-session`，连跑 3 轮共 18 次请求，全部 `200`、零 `429`；延迟 1.35–3.18s，没有随并发上升。串行对照（同样 6 条提示词）延迟 1.67–37.05s，尾部更差。同一天插件换成按会话铸 id 之后的观测是 5 路并发、150 次回放、`150/150` `200`。两组都只是**单模型、当天配额**下的观测，不等于任何并发规模都不会限流——真正的额度是按模型分池的，见下一条。
 - **免费额度是按模型分池的，打满之后这个模型会持续 `429 FreeUsageLimitError`。** 这次实测里 `deepseek-v4.1-flash-free` 被打到限流后，重试 40 秒以上仍然是 429，而上游**不回 `Retry-After`**，所以恢复时间只能靠试；同一时刻 `cat-jam-free`、`step-5-preview-free` 照常 `200`。这是插件管不到的一层——它只改请求体，看不到响应，没法重试或换模型。真要在额度打满后继续用，得在 CPA 侧配 `routing.retry`，或者换一个还没打满的模型。
 - **闸门会变。** 2026-09-16 和 2026-10-14 都改过。工具定义不内嵌，是运行时获取的——删掉缓存（或重跑 `fetch-tools.sh`）再重启即可，不用重新编译。
 
@@ -251,8 +251,8 @@ api-keys:
       headers:
         User-Agent: "opencode/latest/2.0.29/cli"
         x-opencode-client: "cli"
-        x-opencode-session: "$CPA-SESSION-ID"
-        x-opencode-session-id: "$CPA-SESSION-ID"
+        x-opencode-session: "$x-opencode-session"         # 值由插件给，见下文「会话身份」
+        x-opencode-session-id: "$x-opencode-session-id"
       keys:
         - api-key: "public"
       models:
@@ -262,7 +262,9 @@ api-keys:
 
 `base-url` **要带 `/v1`**——CPA 只往后接 `/chat/completions`。写成 `https://opencode.ai/inference` 会得到上游 404，而 CPA 把它报成 `model_not_found`，看起来像模型没注册，很容易误判。
 
-`$CPA-SESSION-ID` 由 CPA 展开为内部 session id。注意它**不一定**满足 `ses_` 形状——若不满足就写常量：
+`$name` 是 CPA 的取值语法：从插件写回 `RequestInterceptResponse.Headers` 的头里按名字取值。会话 id 因此由**插件**提供，每个会话一个，见下文「会话身份」。
+
+`$CPA-SESSION-ID`（CPA 自己的内部 session id）**不要用**：它不是 `ses_` 形状，闸门会回 403。不想要 per-conversation 的话写常量也可以，常量会盖掉插件的值：
 
 ```yaml
         x-opencode-session: "ses_c70c671a8ffe559SNDjUqHfi7a"
@@ -274,6 +276,29 @@ api-keys:
 `models:` 那一节是 CPA 列出和路由模型的唯一依据：`/v1/models` 只回这里声明过的名字，CPA **不会**去上游发现模型，本插件也不注册模型。实测把 `models` 整段删掉，`/v1/models` 立刻从 11 个变成 0 个。想用哪几个免费模型就得逐个写进来——2026-10-15 上游一共给出 11 个：`cat-jam-free`、`mimo-v2.6-flash-free`、`muse-spark-1.2-contributor-free`、`muse-spark-1.3-contributor-free`、`nemotron-3.5-super-vl-free`、`nemotron-3.5-lightning-free`、`jev-1.13-free`、`step-5-preview-free`、`longcat-2.5-preview-free`、`deepseek-v4.1-flash-free`、`space-bunny-free`。
 
 这 11 个不是同一种协议，插件也管不了：`muse-spark-1.2-contributor-free`、`muse-spark-1.3-contributor-free`、`jev-1.13-free` 走 `/v1/chat/completions` 会得到 `400 ModelProtocolUnsupported`（它们只支持原生协议），另外几个则按模型分池限流，配额用完是 `429 FreeUsageLimitError`。这两种都是上游给的，不是改写失败——判定改写是否生效看 debug-log 里的 `decision` 和 `changed`。
+
+## 会话身份：`x-opencode-session` 的值从哪来
+
+闸门要一对头：`x-opencode-session` 与 `x-opencode-session-id`，**同一个值**，形如 `ses_[0-9a-f]{12}[0-9A-Za-z]{14}`，且 `ses_` 之后那 12 位十六进制（时间部分）匹配 `^[0-9a-f]{9}f[c-f][0-9a-f]$`。值本身**可以是常量**（2026-10-16 实测：跨请求复用常量不违反闸门），但常量把所有会话钉在同一个上游会话上，prompt cache 分不出两段对话。插件按 opencode2api 的做法给每个会话铸一个 id。
+
+**取值优先级**（照抄 opencode2api `DeriveRequestIDs`）：
+
+1. 客户端请求头：`x-opencode-session` → `x-opencode-session-id` → `x-session-affinity` → `X-Session-Id` → `x-session-id` → `conversation-id`
+2. body：`conversation_id` → `metadata.session_id` → **第一条 user 消息的 content**（会话种子）→ `previous_response_id`
+3. 都没有 → 随机 `fallback_<hex>`
+
+**规范化**（`CanonicalSessionID`）：
+
+- 已经是真 `ses_` 形状**且**时间部分落在计数器窗口内 → **原样保留**，上游 prompt cache 亲和性不丢
+- 其它任何形态（UUID、第三方客户端的会话、会话种子）→ SHA-256 确定性重编码成同一形态：时间部分取哈希、counter 固定 1（低 12 位 `ffe`）。同一段对话每次算出同一个 id，不同对话算不到一起
+
+用第一条 user 消息当种子而不是整段历史，是为了让**同一段对话在变长的过程中保持同一个 id**（多轮对话第二轮消息更多，但开头没变）。
+
+**只写这两个头。** `x-session-affinity`、`X-Session-Id`、`x-opencode-project`、`x-parent-session-id` 官方客户端会发，但 2026-10-16 消融证明闸门不看它们，所以插件不发（README 开头那张"不需要"表）。`x-opencode-request` 是上游明确 403 的头，CPA 的 openai-compatibility executor 本来就重建请求、不透传客户端头，所以它从来不会出站。
+
+**为什么要靠配置里的 `$`。** 插件写回的头进的是 `opts.Headers`；openai-compatibility executor 是 `http.NewRequestWithContext` 新建请求，只贴 Content-Type / Authorization / User-Agent，再从**供应商配置**里取自定义头（`util.ApplyCustomHeadersFromAttrs`）。配置里写 `$x-opencode-session` 时它才回头去 `opts.Headers` 取值——插件的值由此出站。配置里写常量时，`Header.Set` 会盖掉插件的值，所以常量写法照旧可用（这也是"不想 per-conversation"的退路）。
+
+**一个失败模式**：`$` 取不到值时这个头会被**整个省略**（不是回退成空串），闸门立刻 403。所以插件对**所有**走选中组的请求都写这对头——包括 `skip:model`（被 `models` 收窄掉、body 不改写）那些；只有 `skip:provider` / `skip:no-selection`（不是选中的组、或压根没选）才一个头都不碰。
 
 ## 发布与安装
 
@@ -449,6 +474,18 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 把模型换成 `cat-jam-free` 再跑 5 个真实会话 | `13/13` `200`，5/5 会话退出码 0，零 `SchemaError`——修复与模型无关 |
 | 免费额度是按模型分池的：把 `deepseek-v4.1-flash-free` 打到限流后再测 | `deepseek-v4.1-flash-free` 与 `mimo-v2.6-flash-free` 持续 `429 FreeUsageLimitError`，同一时刻 `cat-jam-free`、`step-5-preview-free` 仍 `200`；上游不回 `Retry-After` |
 | **按提交源码重新构建后**（`sha256 29de7ca6…`）再验一遍：10 个真实 deepseek 会话 + 5 个 cat-jam 会话 + 150 次回放（同一批修复前会 403 的 body，模型换成 `cat-jam-free`） | **`193/193` `200`**，零 `403`、零 `SchemaError`；按三项法则，这一样本量下 95% 置信的失败率上界约 1.55% |
+| **会话身份改造后**：真实 opencode 1.18.35 同一会话两轮（标题 + 两个 turn，共 3 个出站请求） | 3/3 `200`，三次 `X-Opencode-Session` 相同，等于客户端自己的 `ses_ebb856f76ffe…` |
+| 同上另起一个新会话 | 2/2 `200`，会话 id 不同（`ses_ebb85319dffe…`）——一段对话一个 id |
+| 客户端 → 记录层（18403）→ CPA（18330）→ 上游：同一个请求抓三处 | 客户端的 `x-opencode-session`、插件 debug-log 的 `session_id`、上游收到的 `X-Opencode-Session` 三处**完全一致**（`ses_ebb845922ffeF2rweg6yrQX9gL`），标题请求与两个 turn 共 3 个请求都是这个值 |
+| 直接打 CPA，带一个**非 `ses_` 形态**的会话头（UUID），打两次；再换一个 UUID | 两次算出同一个 `ses_13e49677cffe0V94ZPglbSBkSf`；换 UUID 得 `ses_237dc5af0ffe5gnCkL0MFkHJVT`；三个请求都 `200` |
+| 不带任何会话头的裸请求，同一 body 打两次；再换首条 user 消息 | 同一 body 两次都是 `ses_6c22c64afffe3taO3DYAjvlTYR`；换消息得 `ses_627e12198ffe61VZDeGdZKaypI`；都 `200` |
+| 带一个真实 opencode 会话头（`ses_ebd1a1fa7ffeZKJzmyss33slPz`） | 上游原样收到同一个值，`200`——保住了上游 prompt cache 亲和 |
+| 与 opencode2api 参考实现逐字节对齐（在它的仓库里直接调 `CanonicalSessionID` / `conversationSeed`） | 5 个信号全部一致：两个 UUID、两个会话种子、一个真会话 id；回放用的两个 body 由它算出 `ses_a6ba23441ffe3donkSTRsTA4R9` / `ses_a8a766882ffe1LcgHaqr3vOTAj`，与插件实际发到上游的值相同 |
+| **会话身份改造后**的 150 次回放（75 个标题 body + 75 个客户端 agent body，5 路并发，`cat-jam-free`，`sha256 dae49577…`） | **`150/150` `200`**；150 个请求全部带这对头且两值相同；两个 body 各自稳定在一个会话，跨 75 次重复不变 |
+| 会话头配置写 `$x-opencode-session`（不是常量），上游实际收到的值 | 收到的是插件给的值（上面三处一致那一行），说明 `$` 取值这条链路通 |
+| **最终提交构建**（`sha256 e4f00816…`，与上一行那份只差注释）复验：7 个身份探针 + 真实 opencode 同一会话两轮（标题+2 turn，3 个请求）+ 40 次回放（20+20） | **`50/50` `200`**，无缺头、无两值不一致；两轮同一会话共用一个 id（`ses_ebb7b4fa0ffe…`）；探针结果与上面几行逐项一致 |
+| 最终提交构建再打 150 次（同一批 body） | `54` 个 `200` + `96` 个 `429 FreeUsageLimitError`，**零 `403`**——`cat-jam-free` 当天的池子已被前面几轮打满 |
+| 换还有额度的 `nemotron-3.5-lightning-free` 单发（同一 agent body） | `200`；确认限流按模型分池，与插件无关 |
 
 即：403 确实由本插件消除，改写范围严格限定在选中的供应商内，且二进制里不含 GPL 数据。
 

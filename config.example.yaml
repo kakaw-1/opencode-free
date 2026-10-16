@@ -76,14 +76,21 @@ api-keys:
       headers:
         User-Agent: "opencode/latest/2.0.29/cli"
         x-opencode-client: "cli"
-        # $CPA-SESSION-ID expands to CPA's internal session id. If the resulting
-        # value does not match ses_[0-9a-f]{12}[0-9A-Za-z]{14} with a time part
-        # matching ^[0-9a-f]{9}f[c-f][0-9a-f]$, replace both with the constant
-        # below — the gate checks the shape, and a constant works across requests.
+        # "$name" takes the value out of the headers the request interceptor
+        # wrote, which is how the plugin hands over the session id it mints per
+        # conversation. If nothing supplies a value CPA drops the header
+        # entirely and the gate answers 403, so the plugin writes this pair on
+        # every request going to a selected group — including model-narrowed
+        # ones it does not rewrite.
+        x-opencode-session: "$x-opencode-session"
+        x-opencode-session-id: "$x-opencode-session-id"
+        # Alternative without the plugin in the loop: one constant that already
+        # has the shape the gate checks (ses_ + 12 hex + 14 base62, time part
+        # matching ^[0-9a-f]{9}f[c-f][0-9a-f]$). It works, and it pins every
+        # conversation to one upstream session, so prompt caching cannot tell
+        # two conversations apart. A literal here wins over the plugin's value.
         # x-opencode-session: "ses_c70c671a8ffe559SNDjUqHfi7a"
         # x-opencode-session-id: "ses_c70c671a8ffe559SNDjUqHfi7a"
-        x-opencode-session: "$CPA-SESSION-ID"
-        x-opencode-session-id: "$CPA-SESSION-ID"
       keys:
         # The anonymous free tier key is the literal string "public".
         - api-key: "public"

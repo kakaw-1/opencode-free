@@ -4,9 +4,9 @@
     {
       "id": "opencode-free",
       "name": "OpenCode Free",
-      "description": "Makes OpenCode Zen free-tier models usable from CLIProxyAPI. The free tier gates on the request body — it wants a streaming request carrying OpenCode's official read tool definition — and a provider config cannot inject a body. This plugin rewrites the outbound Chat Completions request for the OpenAI-compatible groups you select, and leaves every other provider untouched.",
+      "description": "Makes OpenCode Zen free-tier models usable from CLIProxyAPI. The free tier gates on the request body — it wants a streaming request carrying an entry named read — and a provider config cannot inject a body. This plugin rewrites the outbound Chat Completions request for the OpenAI-compatible groups you select, mints the per-conversation x-opencode-session pair the same way opencode2api does, and leaves every other provider untouched.",
       "author": "kakaw-1",
-      "version": "0.1.1",
+      "version": "0.1.3",
       "repository": "https://github.com/kakaw-1/opencode-free",
       "homepage": "https://github.com/kakaw-1/opencode-free",
       "license": "MIT",

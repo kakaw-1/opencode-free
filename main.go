@@ -79,7 +79,7 @@ const pluginID = "opencode-free"
 // GitHubRepository are all non-empty (see pluginhost.validPlugin), so these are
 // load-bearing, not decoration. Only the emptiness is checked, but they are
 // shown to operators, so point them at the real repo.
-const pluginVersion = "0.1.2"
+const pluginVersion = "0.1.3"
 
 // Vars rather than consts so `make REPO_URL=... AUTHOR=...` can stamp them in at
 // build time via -ldflags -X. Publishing this source means setting both — see
@@ -524,7 +524,8 @@ func providerEnumValues() []string {
 }
 
 // interceptAfterAuth rewrites the outbound Chat Completions body so OpenCode's
-// free tier accepts it. This is the whole plugin.
+// free tier accepts it, and fills in the per-conversation session identity pair
+// (see identity.go) for the selected providers.
 //
 // It runs for every provider CPA serves, so it does nothing unless the model
 // matches the configured filter. An empty `providers` means the filter matches
@@ -545,6 +546,7 @@ func interceptAfterAuth(raw []byte) ([]byte, error) {
 
 	decision := "skip"
 	authID := selectedAuthID(req.Metadata)
+	providerSelected := providerSelectionMatches(providers, authID)
 	switch {
 	case catalogue == nil:
 		decision = "skip:not-registered"
@@ -554,7 +556,7 @@ func interceptAfterAuth(raw []byte) ([]byte, error) {
 		// log says "you have not chosen anything" rather than "you chose
 		// something else".
 		decision = "skip:no-selection"
-	case !providerSelectionMatches(providers, authID):
+	case !providerSelected:
 		decision = "skip:provider"
 	case len(models) > 0 && !modelMatches(models, req.Model, req.RequestedModel):
 		decision = "skip:model"
@@ -562,22 +564,35 @@ func interceptAfterAuth(raw []byte) ([]byte, error) {
 		decision = "rewrite"
 	}
 
+	// The session identity pair is written for every request heading to a
+	// selected group, including the ones the model filter keeps the plugin from
+	// rewriting: a provider config that asks for these two headers by name
+	// (`x-opencode-session: "$x-opencode-session"`) drops the header entirely
+	// when nothing supplies a value, and a missing header is a 403. Requests to
+	// groups the operator did not select stay byte for byte untouched.
+	headers := req.Headers
+	session := ""
+	if providerSelected {
+		session = deriveSessionID(req.Headers, req.Body)
+		headers = sessionIdentityHeaders(req.Headers, session)
+	}
+
 	if decision != "rewrite" {
-		debugIntercept(debugLog, req, authID, decision, false)
-		return okEnvelope(pluginapi.RequestInterceptResponse{Headers: req.Headers, Body: req.Body})
+		debugIntercept(debugLog, req, authID, decision, false, session)
+		return okEnvelope(pluginapi.RequestInterceptResponse{Headers: headers, Body: req.Body})
 	}
 
 	body, changed := prepareBody(req.Body, forceStream, catalogue)
-	debugIntercept(debugLog, req, authID, decision, changed)
+	debugIntercept(debugLog, req, authID, decision, changed, session)
 	if !changed {
-		return okEnvelope(pluginapi.RequestInterceptResponse{Headers: req.Headers, Body: req.Body})
+		return okEnvelope(pluginapi.RequestInterceptResponse{Headers: headers, Body: req.Body})
 	}
-	return okEnvelope(pluginapi.RequestInterceptResponse{Headers: req.Headers, Body: body})
+	return okEnvelope(pluginapi.RequestInterceptResponse{Headers: headers, Body: body})
 }
 
 // debugIntercept appends one JSON line per intercepted request when debug-log
 // is configured. Failures are swallowed: diagnostics must never break a request.
-func debugIntercept(path string, req pluginapi.RequestInterceptRequest, authID, decision string, changed bool) {
+func debugIntercept(path string, req pluginapi.RequestInterceptRequest, authID, decision string, changed bool, session string) {
 	if path == "" {
 		return
 	}
@@ -585,6 +600,7 @@ func debugIntercept(path string, req pluginapi.RequestInterceptRequest, authID, 
 		"decision":         decision,
 		"changed":          changed,
 		"selected_auth_id": authID,
+		"session_id":       session,
 		"model":            req.Model,
 		"requested_model":  req.RequestedModel,
 		"source_format":    req.SourceFormat,

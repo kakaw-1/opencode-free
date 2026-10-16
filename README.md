@@ -24,13 +24,14 @@ which is why the injected `read` can always be chosen by the model.
 
 ## What this does
 
-Declares one capability (`request_interceptor`) on the `request.intercept_after` hook and rewrites the outbound Chat Completions body for the OpenAI-compatible groups you name:
+Declares one capability (`request_interceptor`) on the `request.intercept_after` hook and rewrites the outbound Chat Completions request for the OpenAI-compatible groups you name:
 
-0. Credential is not one of the selected `providers` (or the model does not match `models`) → **passed through untouched**
-1. `stream != true` → set to `true`
-2. `tools` missing or without `read` → append the official `read` definition; a caller that declares its own `read` is left byte for byte alone
-3. A system prompt carrying both `You are a title generator` and `Never use tools` → the tool ban is reworded to the equivalent `Do not call any tools`, nothing else in the prompt is touched
-4. Everything else is left alone, so downstream function calling still works
+0. Credential is not one of the selected `providers` → **passed through untouched**, body and headers alike
+1. Credential is selected → write `x-opencode-session` and `x-opencode-session-id` with this conversation's id (see *Session identity*); a request the `models` filter does not match stops here, body untouched
+2. `stream != true` → set to `true`
+3. `tools` missing or without `read` → append the official `read` definition; a caller that declares its own `read` is left byte for byte alone
+4. A system prompt carrying both `You are a title generator` and `Never use tools` → the tool ban is reworded to the equivalent `Do not call any tools`, nothing else in the prompt is touched
+5. Everything else is left alone, so downstream function calling still works
 
 The rewrite is idempotent: a request that is already valid is not modified or re-encoded.
 
@@ -102,14 +103,50 @@ api-keys:
       headers:
         User-Agent: "opencode/latest/2.0.29/cli"
         x-opencode-client: "cli"
-        x-opencode-session: "$CPA-SESSION-ID"
-        x-opencode-session-id: "$CPA-SESSION-ID"
+        x-opencode-session: "$x-opencode-session"       # value comes from the plugin
+        x-opencode-session-id: "$x-opencode-session-id"
       keys:
         - api-key: "public"
       models:
         - name: mimo-v2.6-flash-free
           alias: mimo-free
 ```
+
+`$name` makes CPA read the value out of the headers the request interceptor
+wrote, which is how the plugin hands over the per-conversation session id. A
+literal in that spot wins over the plugin's value, so a constant works too —
+it just pins every conversation to one upstream session. `$CPA-SESSION-ID`
+(CPA's own internal id) is the wrong shape and gets a 403; do not use it.
+
+## Session identity
+
+The gate wants `x-opencode-session` and `x-opencode-session-id` to carry the
+**same** `ses_[0-9a-f]{12}[0-9A-Za-z]{14}` value whose time part matches
+`^[0-9a-f]{9}f[c-f][0-9a-f]$`. A constant satisfies it (measured 2026-10-16),
+but a constant pins every conversation to one upstream session, so prompt
+caching cannot tell two conversations apart.
+
+The plugin mints one id per conversation the way opencode2api does. Signals, in
+order: the client's `x-opencode-session`, `x-opencode-session-id`,
+`x-session-affinity`, `X-Session-Id`, `x-session-id`, `conversation-id`; then
+the body's `conversation_id`, `metadata.session_id`, the **first user turn** as
+a seed, and `previous_response_id`; then a random fallback. A signal that is
+already a genuine `ses_` id is passed through unchanged (keeping upstream
+prompt-cache affinity); anything else is deterministically re-encoded into that
+shape, counter 1, so one conversation stays on one id as it grows.
+
+Only those two headers are written. `x-session-affinity`, `X-Session-Id`,
+`x-opencode-project` and `x-parent-session-id` are what the official client
+sends, but the gate does not look at them (ablated 2026-10-16), so they are not
+sent. `x-opencode-request` never leaves CPA at all: the openai-compatibility
+executor builds a fresh request and forwards no client headers.
+
+One failure mode to know about: with the `$name` form, a value nobody supplies
+means CPA omits the header entirely rather than sending an empty one, and a
+missing header is a 403. That is why the plugin writes the pair on every request
+heading to a selected group — including the model-narrowed ones it does not
+rewrite. Only `skip:provider` and `skip:no-selection` leave headers untouched.
+`intercept.log` records the value it used as `session_id`.
 
 Build on the machine that will run it, or take the prebuilt library from the releases (built against glibc 2.17 so it loads on older hosts).
 
@@ -137,6 +174,19 @@ So the plugin downloads and caches it at registration instead — one fetch, reu
 ## Status
 
 Reverse engineered and verified end to end against real CPA and the real upstream on 2026-10-15 and 2026-10-16. The gate is not a documented contract and has changed twice already (2026-09-16, 2026-10-14) — if requests start returning 403, delete the cached catalogue and restart; no rebuild needed.
+
+Session identity was verified through a capture layer that logs the client, the plugin
+and the upstream for the same request: all three agreed on
+`ses_ebb845922ffeF2rweg6yrQX9gL` across a title request and two turns. Two
+conversations on the real CLI produced two different ids, each stable across its
+own requests; a UUID supplied by hand was re-encoded deterministically (same
+result twice); a request with no signal at all fell back to the first user turn
+and stayed stable. The plugin's ids match opencode2api's own implementation
+byte for byte on every signal tried, and a 150-request replay at 5-way
+concurrency returned `150/150` `200` with both headers present and equal on
+every request. The final artifact (`sha256 e4f00816…`, comment-only rebuild)
+re-ran the probes, the two-turn CLI conversation and 40 more replays: `50/50`
+`200`. `README_CN.md` has the full tables.
 
 One red herring, because it is the first thing anyone clicks: the management
 panel's per-provider **Test** button always fails for this provider. It posts to
@@ -220,6 +270,9 @@ had a worse tail (up to 37s). The plugin rewrote every one of them — the debug
 log grew by exactly the request count. Asking those agents for a file is where
 the injected `read` shows up: 4 of 6 hit `unsupported call: read` before falling
 back to their own shell, which turned 6 requests into 16 and 11s into 15–25s.
+That run predates per-conversation identity, so those six agents were pinned to
+one upstream session; the same six today get six ids, and limiting looks like it
+is pooled per model rather than per session either way.
 
 That check also found the reason `v0.1.1` exists: a store install writes the
 library and enables the plugin but cannot write `providers`, and `v0.1.0`
@@ -227,5 +280,10 @@ refused to register without it. The install reported success while the plugin
 never loaded. `v0.1.1` registers inert instead, and a single `PATCH` on
 `/v0/management/plugins/opencode-free/config` brings it to life without a
 restart.
+
+`v0.1.2` stopped rewriting a client's own tool definitions (OpenCode 1.18.35
+declares `read` with `filePath`, the cached catalogue with `path`) and unblocked
+the title-generation prompt. `v0.1.3` adds the per-conversation session identity
+pair described above.
 
 MIT — see [LICENSE](LICENSE). [NOTICE](NOTICE) records the scope: the license covers the plugin's source, not the OpenCode tool definitions it fetches at runtime.
