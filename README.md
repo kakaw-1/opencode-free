@@ -154,6 +154,20 @@ the same empty answer for the price of a per-chunk hot-path hook. `tool_choice:
 `nemotron-3.5-lightning-free` honour it, `step-5-preview-free` ignores it
 outright.
 
+A system-prompt disclaimer ("the `read` tool is not available in this
+environment") was measured and rejected as well. It does move the needle when
+the request carries no client tools and no client system prompt: 18/18 down to
+3/18, though a rerun of the identical setup gave 5/12, so even that corner is
+noisy. Add either ingredient and it stops working — with client tools present
+it is 12/12, with an agentic client system prompt 11/12, with both 12/12.
+Hardening the wording ("every call to `read` returns an error, use a shell
+command instead") changed nothing: 10/10 and 9/9. The tools array is hard
+evidence that the tool exists, the client's own "you have tools, use them"
+prompt reinforces it, and a single soft line loses against both. The gate
+compares `read`'s definition byte for byte, so free text is the plugin's only
+lever — and the weakest one. Telling the model `read` is broken unconditionally
+would also break clients that declare and implement their own `read`.
+
 The store path is verified too, not just the source build: the published
 artifact was installed through CPA's own
 `POST /v0/management/plugin-store/:id/install` into a clean plugin directory,
