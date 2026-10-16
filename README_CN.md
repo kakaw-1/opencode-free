@@ -17,8 +17,13 @@ HTTP 403  FreeTierError
 | 官方 header 齐、body 无 `tools` | `403 FreeTierError` |
 | 无官方 header、body 带官方 `read` 定义 | `403 FreeTierError` |
 | 官方 header 齐 **且** body 带官方 `read` 定义 | `200` |
+| 官方 header 齐、`tools` 里只有客户端自己的工具（`exec_command`/`write_stdin`/`view_image`/`update_plan`/`apply_patch`，即 Codex CLI 实际发的那批），**没有** `read` | `403 FreeTierError` |
+| 官方 header 齐、同一批客户端工具 **加上**官方 `read` | `200` |
+| 官方 header 齐、只放 1 个未知工具 | `403 FreeTierError` |
 
 所以"插件启用了还 403"只有两种解释：请求没被改写（最常见，见下文商店安装那一步），或者改写了但上游要的 `read` 定义变了。
+
+**"客户端自带工具"不能免掉注入**（2026-10-16 补测）。闸门要的是那条官方 `read` 本身，不是"有没有工具"：Codex CLI 一次请求会带 9 件自己的工具，把它们原样发上去照样 403，加上 `read` 才 200。所以插件没有"客户端已有工具就不注入"这条捷径可走，注入的 `read` 也就永远有机会被模型调用。
 
 ## 闸门配方（2026-10-15 直接对 `https://opencode.ai/inference` 实测）
 

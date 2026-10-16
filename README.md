@@ -14,6 +14,12 @@ HTTP 403  FreeTierError
 
 The URL is right, and headers alone do not get you in. The gate wants both halves: the OpenCode headers (a CPA provider config supplies those) **and** a streaming body carrying OpenCode's official `read` tool definition, byte for byte. Ablated against the real upstream on 2026-10-15: headers without the tool definition → 403, tool definition without the headers → 403, both → 200. A CPA provider config has no way to touch the body, so a plugin is the only seam.
 
+Bringing your own tools does not exempt you from that. Codex CLI sends nine of
+its own on every request (`exec_command`, `write_stdin`, `view_image`, …); sent
+to the upstream as-is they still return 403, and only adding the official `read`
+gets a 200. There is no "client already has tools, skip the injection" shortcut,
+which is why the injected `read` can always be chosen by the model.
+
 ## What this does
 
 Declares one capability (`request_interceptor`) on the `request.intercept_after` hook and rewrites the outbound Chat Completions body for the OpenAI-compatible groups you name:
