@@ -157,8 +157,9 @@ curl -X PATCH -H 'Authorization: Bearer <管理密钥>' \
 
 - **注入的 `read` 会真的被调用。** 文件类/agent 类提示词的请求实测 **17/17** 都触发了 `read` 调用（`finish_reason: tool_calls`），普通对话提示词 **7/7** 不触发。这 17 次里 **14 次 content 为空**，只有 3 次带 28–90 字符的正文。客户端自己声明了工具也拦不住——模型会挑注入的 `read`，而不是客户端那件工具（3/3）。这个 `tool_use` 会作为下游客户端从未声明过的工具调用送达。
 - **`tool_choice: "none"` 不是可靠的堵法。** `cat-jam-free` 5/5 遵守（不再产生 tool call，但 content 仍然常常为空）、`nemotron-3.5-lightning-free` 1/1 遵守，而 `step-5-preview-free` 3/3 **直接忽略**，照样回 tool call。在请求里塞一句"你没有工具"的系统提示也一样无效（2/2 仍然调用）。所以这是**按模型而异**的，不能当作通用开关。
+- **真实 agent 会被这个 tool call 绊一下，但能自愈。** Codex CLI 收到它之后工具路由直接报 `ERROR codex_core::tools::router: error=unsupported call: read`，然后自己退回 shell `cat` 把活干完。6 个 agent 并发问"读 /etc/hostname"：4/6 撞上这个错误（共 5 次），上游请求数从普通对话的 6 次涨到 **16 次**，墙钟从 ~11s 涨到 15–25s。最终 6/6 都答对了，代价是多花了一轮请求。
 - **非流式下游请求会坏。** 上游强制 SSE，本插件不设保护，放行让它坏。
-- **常量 session id 在高并发下是否被限流，未验证。**
+- **常量 session id 在 6 路并发下没有被限流**（2026-10-16 实测）。6 个真实 agent（Codex CLI，`wire_api=responses` → CPA `/v1/responses` → 插件 → 上游）共用同一个常量 `x-opencode-session`，连跑 3 轮共 18 次请求，全部 `200`、零 `429`；延迟 1.35–3.18s，没有随并发上升，第 3 轮反而最快。串行对照（同样 6 条提示词）延迟 1.67–37.05s，尾部更差。注意这是**单模型、当天配额、6 路**的观测，不等于任何并发规模都不会限流。
 - **闸门会变。** 2026-09-16 和 2026-10-14 都改过（后者加了逐字节定义比对）。工具定义不内嵌，是运行时获取的——删掉缓存（或重跑 `fetch-tools.sh`）再重启即可，不用重新编译。
 
 ## 安装
@@ -378,6 +379,11 @@ live 测试需要先跑 `./fetch-tools.sh`；没有 `opencode_tools.json` 时它
 | 同请求加 `tool_choice: "none"` | `cat-jam-free` 5/5、`nemotron-3.5-lightning-free` 1/1 不再产生 tool call；`step-5-preview-free` 3/3 忽略它，照样回 tool call |
 | 同请求塞系统提示"你没有工具，直接回答" | 无效，2/2 仍然调 `read` |
 | 剥离收益测算（把 tool call 从响应里去掉后客户端看到什么） | 17 次泄漏里 14 次剥完仍是空回复，3 次保住 28–90 字符正文 |
+| 6 个真实 agent 并发（Codex CLI `wire_api=responses` → CPA `/v1/responses` → 插件 → 上游），普通对话 | 6/6 成功，6 次上游请求全 `200`，延迟 2.46–3.14s，答案各自正确、无串扰 |
+| 同上连跑 3 轮（18 次请求，全部共用同一个常量 `x-opencode-session`） | 18/18 `200`，零 `429`，延迟 1.35–3.18s；第 3 轮最快，无衰减 |
+| 串行对照（同样 6 条提示词逐条跑） | 6/6 `200`，延迟 1.67–37.05s，尾部比并发组更差 |
+| 6 个 agent 并发问"读 `/etc/hostname`" | 6/6 最终答对；4/6 撞 `unsupported call: read`（共 5 次），上游请求 16 次，墙钟 15–25s |
+| 插件改写覆盖率（三轮测试） | `intercept.log` 增量与上游请求数完全一致：6/6、18/18、16/16 |
 
 即：403 确实由本插件消除，改写范围严格限定在选中的供应商内，且二进制里不含 GPL 数据。
 

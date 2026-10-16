@@ -154,6 +154,15 @@ artifact was installed through CPA's own
 hot-loaded without a restart, and served a real request with `HTTP 200`. The
 installed `.so` hashes identically to the released zip.
 
+Concurrency was measured with six real agents (Codex CLI, `wire_api=responses`
+through CPA's `/v1/responses`) sharing one constant `x-opencode-session`: 18
+requests across three waves, all `200`, no `429`, latency flat at 1.35–3.18s and
+faster in the last wave than the first. A serial control of the same six prompts
+had a worse tail (up to 37s). The plugin rewrote every one of them — the debug
+log grew by exactly the request count. Asking those agents for a file is where
+the injected `read` shows up: 4 of 6 hit `unsupported call: read` before falling
+back to their own shell, which turned 6 requests into 16 and 11s into 15–25s.
+
 That check also found the reason `v0.1.1` exists: a store install writes the
 library and enables the plugin but cannot write `providers`, and `v0.1.0`
 refused to register without it. The install reported success while the plugin
